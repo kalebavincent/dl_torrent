@@ -1,0 +1,33 @@
+{
+    "generic": {
+        "user": "Utilisateur"
+    },
+    "home": {
+        "welcome": {
+            "new_user": "👋 Bienvenue {name} sur {botname} !\n\nJe suis un bot spécialisé dans les téléchargements sécurisés.\n\nPour commencer, envoyez-moi un lien ou utilisez les boutons ci-dessous.",
+            "returning_user": "✨ Bon retour {name} !\n\nPrêt pour de nouveaux téléchargements ?"
+        },
+        "buttons": {
+            "help": "❓ Aide",
+            "download": "⬇️ Télécharger",
+            "settings": "⚙️ Préférences"
+        }
+    },
+    "user": {
+        "stats_summary": "📊 Votre activité:\n- {dl_count} téléchargements\n- Dernière connexion: {last_active}"
+    },
+    "system": {
+        "check_updates": "🔄 Mises à jour",
+        "support_contact": "@support_contact",
+        "log": {
+            "new_user": "Nouvel utilisateur: {user_id} (Lang: {lang})"
+        }
+    },
+    "errors": {
+        "generic": "⚠️ Une erreur est survenue. Contactez {support} si le problème persiste.",
+        "command_failed": "Échec de la commande {command}: {error}"
+    },
+    "formats": {
+        "date": "%d/%m/%Y à %H:%M"
+    }
+}
