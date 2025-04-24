@@ -4,8 +4,7 @@ from database.user import UserManager
 from database.base import MongoDB
 from utils.torrent import TorrentClient
 from config import Config
-from route import web_server
-from aiohttp import web
+
 
 if TYPE_CHECKING:
     from bot.bot import Bot
@@ -36,10 +35,7 @@ class Dependencies:
     
     async def startup(self):
         await self.mongo.connect()
-        if Config.WEBHOOK:
-            app = web.AppRunner(await web_server())
-            await app.setup()       
-            await web.TCPSite(app, "0.0.0.0", 8080).start()     
+        
     
     async def shutdown(self):
         """Nettoie les ressources."""
