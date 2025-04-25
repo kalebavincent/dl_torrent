@@ -1,3 +1,5 @@
+import os
+from urllib.parse import urlparse
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
@@ -15,14 +17,40 @@ logger = logging.getLogger(__name__)
 # Configuration des expressions régulières
 TORRENT_REGEX = r"^.*\.(torrent)$"
 MAGNET_REGEX = r"^magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}.*$"
+ALLOWED_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.mp3', '.zip', '.rar', '.pdf', '.docx', '.xlsx', '.pptx', '.txt', ".cbz", ".cb7", ".cbr", ".cbt", ".cb7z", ".cb7z", ".torrent"}
+DIRECT_LINK_REGEX = r"https?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
 
-# Dictionnaire pour suivre les téléchargements actifs
+def is_valid_direct_link(url: str) -> bool:
+    """Valide que le lien pointe vers un fichier téléchargeable"""
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme in ('http', 'https'):
+            return False
+            
+        path = Path(parsed.path)
+        if not path.suffix.lower() in ALLOWED_EXTENSIONS:
+            return False
+            
+        return True
+    except:
+        return False
+
+def extract_direct_link(text: str) -> Optional[str]:
+    """Extrait et valide un lien direct"""
+    match = re.search(DIRECT_LINK_REGEX, text)
+    if not match:
+        return None
+        
+    url = match.group(0)
+    return url if is_valid_direct_link(url) else None
+
 active_downloads: Dict[str, Dict[str, Any]] = {}
 
 def extract_magnet_link(text: str) -> Optional[str]:
     """Extrait un lien magnet d'un texte"""
     match = re.search(MAGNET_REGEX, text)
     return match.group(0) if match else None
+
 
 def is_torrent_file(filename: str) -> bool:
     """Vérifie si un fichier est un fichier torrent"""
@@ -34,7 +62,6 @@ async def validate_user_quota(user_id: int) -> bool:
     if not user:
         return False
         
-    # Vérifier le nombre de téléchargements actifs
     active_count = len([d for d in active_downloads.values() if d['user_id'] == user_id])
     return active_count < user.settings.max_parallel
 
@@ -51,7 +78,6 @@ async def cleanup_stalled_downloads(client: Client):
                         text=f"🛑 <b>Téléchargement annulé</b>\n\nLe téléchargement {dl_info['name']} a été bloqué trop longtemps.",
                         parse_mode=ParseMode.HTML
                     )
-                    # Supprimer les fichiers associés
                     dl_path = Path(dl_info.get('dl_path', ''))
                     if dl_path.exists():
                         for file in dl_path.glob('*'):
@@ -72,7 +98,7 @@ async def cleanup_stalled_downloads(client: Client):
 async def start_background_tasks(client: Client):
     """Lance les tâches d'arrière-plan"""
     while True:
-        await asyncio.sleep(3600)  # Toutes les heures
+        await asyncio.sleep(3600)  # 1 heure
         try:
             await cleanup_stalled_downloads(client)
         except Exception as e:
@@ -95,10 +121,9 @@ async def send_progress_update(client: Client, user_id: int, download_id: str):
             current_duration = current_time - start_time
             active_downloads[download_id]['duration'] = current_duration
             
-            # Vérifier si le téléchargement est vraiment terminé
             is_completed = (stats.progress >= 99.9 or 
                           (stats.speed <= 0.01 and stats.peers == 0 and stats.progress > 95) or
-                          (current_duration > 1800 and abs(stats.progress - last_progress) < 0.1))  # 30 minutes sans progression
+                          (current_duration > 1800 and abs(stats.progress - last_progress) < 0.1))  
             
             progress_msg = (
                 f"📊 <b>Progression du téléchargement</b>\n\n"
@@ -110,7 +135,6 @@ async def send_progress_update(client: Client, user_id: int, download_id: str):
                 f"📦 Taille: {stats.done:.1f}/{stats.wanted:.1f} MB"
             )
             
-            # Ne mettre à jour que si nécessaire (changement >1% ou 30s écoulées)
             if (abs(stats.progress - last_progress) > 1 or (current_time - last_update) > 30):
                 if 'msg_id' in active_downloads[download_id]:
                     try:
@@ -134,13 +158,11 @@ async def send_progress_update(client: Client, user_id: int, download_id: str):
                     active_downloads[download_id]['msg_id'] = msg.id
                     last_update = current_time
                 
-            # Vérification robuste de la complétion
             if is_completed or stats.progress >= 100.0:
                 logger.info(f"Téléchargement {download_id} marqué comme complet (Prog: {stats.progress}%, Speed: {stats.speed}, Peers: {stats.peers})")
                 await handle_download_complete(client, user_id, download_id)
                 break
                 
-            # Si la progression stagne pendant trop longtemps
             if (abs(stats.progress - last_progress) < 0.1 and 
                 current_duration > 3600 and 
                 stats.progress < 99.9):  # 1 heure sans progression
@@ -162,6 +184,7 @@ async def send_progress_update(client: Client, user_id: int, download_id: str):
 async def handle_download_complete(client: Client, user_id: int, download_id: str):
     """Gère la complétion d'un téléchargement"""
     if download_id not in active_downloads:
+        logger.warning(f"ID de téléchargement inconnu: {download_id}")
         return
         
     download_info = active_downloads[download_id]
@@ -170,9 +193,12 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
         stats = await deps.torrent_client.stats(download_id)
         if not stats:
             logger.error(f"Aucune statistique finale pour {download_id}")
+            await client.send_message(
+                chat_id=user_id,
+                text=f"❌ Impossible de récupérer les stats du torrent {download_id}"
+            )
             return
             
-        # Formatage du temps de téléchargement
         duration = download_info.get('duration', 0)
         hours, remainder = divmod(duration, 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -196,14 +222,34 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
         
         # Envoyer tous les fichiers du dossier de téléchargement avec progression
         dl_path = Path(download_info['dl_path'])
-        if dl_path.exists() and dl_path.is_dir():
-            files = [f for f in dl_path.glob('*') if f.is_file()]
+        logger.info(f"Tentative d'envoi depuis: {dl_path} (existe: {dl_path.exists()})")
+
+        if not dl_path.exists():
+            await status_msg.edit_text(f"{completed_msg}\n\n❌ Erreur: Dossier introuvable")
+            logger.error(f"Dossier introuvable: {dl_path}")
+            return
+            
+        if not dl_path.is_dir():
+            await status_msg.edit_text(f"{completed_msg}\n\n❌ Erreur: Le chemin n'est pas un dossier")
+            logger.error(f"Le chemin n'est pas un dossier: {dl_path}")
+            return
+
+        try:
+            files = list(dl_path.rglob('*'))  
+            files = [f for f in files if f.is_file() and not f.name.startswith('.')] 
             total_files = len(files)
             sent_files = 0
             
+            logger.info(f"Fichiers à envoyer ({total_files}): {[f.name for f in files]}")
+            
+            if not files:
+                await status_msg.edit_text(f"{completed_msg}\n\n⚠️ Aucun fichier trouvé dans le dossier")
+                logger.warning("Aucun fichier trouvé dans le dossier de téléchargement")
+                return
+                
             for file_path in files:
                 try:
-                    # Mettre à jour le statut
+
                     progress_text = (
                         f"📦 Envoi des fichiers ({sent_files}/{total_files})\n"
                         f"📄 En cours: {file_path.name[:50]}..."
@@ -212,35 +258,57 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                         f"{completed_msg}\n\n{progress_text}"
                     )
                     
-                    # Envoyer le fichier avec gestion de la taille
-                    if file_path.stat().st_size > 2000 * 1024 * 1024:  # 2GB
+                    # Vérifier la taille et les permissions
+                    file_size = file_path.stat().st_size
+                    if not os.access(file_path, os.R_OK):
+                        logger.error(f"Permission refusée pour {file_path}")
                         await client.send_message(
                             chat_id=user_id,
-                            text=f"⚠️ Fichier trop volumineux pour Telegram: {file_path.name} ({file_path.stat().st_size/1024/1024:.1f} MB)"
+                            text=f"⚠️ Permission refusée pour: {file_path.name}"
+                        )
+                        continue
+                        
+                    if file_size > 2000 * 1024 * 1024:  # 2GB
+                        await client.send_message(
+                            chat_id=user_id,
+                            text=f"⚠️ Fichier trop volumineux pour Telegram: {file_path.name} ({file_size/1024/1024:.1f} MB)"
                         )
                     else:
-                        await client.send_document(
-                            chat_id=user_id,
-                            document=str(file_path),
-                            caption=f"📁 {file_path.name}",
-                            progress=lambda current, total, name: logger.debug(f"Progression {name} {current}/{total}"),
-                            progress_args=(file_path.name,)
-                        )
-                    sent_files += 1
-                    
+                        try:
+                            await client.send_document(
+                                chat_id=user_id,
+                                document=str(file_path),
+                                caption=f"📁 {file_path.name}",
+                                disable_notification=True,
+                                progress=update_progress,
+                                progress_args=(
+                                    client, 
+                                    status_msg, 
+                                    completed_msg, 
+                                    file_path.name, 
+                                    sent_files, 
+                                    total_files
+                                )
+                            )
+                            sent_files += 1
+                        except Exception as send_error:
+                            logger.error(f"Échec envoi {file_path}: {send_error}", exc_info=True)
+                            await client.send_message(
+                                chat_id=user_id,
+                                text=f"⚠️ Échec envoi fichier: {file_path.name} ({str(send_error)})"
+                            )
+                            continue
+                            
                     # Supprimer le fichier après envoi
                     try:
                         file_path.unlink()
                         logger.info(f"Fichier supprimé: {file_path}")
                     except Exception as e:
-                        logger.error(f"Erreur suppression fichier {file_path}: {e}")
+                        logger.error(f"Échec suppression {file_path}: {e}")
                         
                 except Exception as e:
-                    logger.error(f"Erreur envoi fichier {file_path}: {e}")
-                    await client.send_message(
-                        chat_id=user_id,
-                        text=f"❌ Impossible d'envoyer le fichier {file_path.name}: {str(e)}"
-                    )
+                    logger.error(f"Erreur traitement fichier {file_path}: {e}", exc_info=True)
+                    continue
             
             # Message final
             final_msg = (
@@ -252,6 +320,13 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                 final_msg += f"⚠️ {total_files - sent_files} fichiers non envoyés (trop volumineux ou erreur)"
             
             await status_msg.edit_text(final_msg)
+            logger.info(f"Transfert terminé pour {download_id}. Fichiers envoyés: {sent_files}/{total_files}")
+        
+        except Exception as e:
+            logger.error(f"Erreur lors de l'envoi des fichiers: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"{completed_msg}\n\n❌ Erreur lors de l'envoi des fichiers: {str(e)}"
+            )
         
     except Exception as e:
         logger.error(f"Erreur complétion: {e}", exc_info=True)
@@ -264,6 +339,8 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
         # Nettoyage final
         try:
             await deps.torrent_client.remove(download_id, delete_data=True)
+            
+            # Suppression du dossier de téléchargement
             dl_path = Path(download_info['dl_path'])
             if dl_path.exists():
                 # Supprimer tous les fichiers restants
@@ -271,14 +348,14 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                     try:
                         if file.is_file():
                             file.unlink()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Échec suppression fichier {file}: {e}")
                 # Supprimer le dossier
                 try:
                     dl_path.rmdir()
                     logger.info(f"Dossier supprimé: {dl_path}")
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Échec suppression dossier {dl_path}: {e}")
                 
             # Supprimer le fichier temporaire torrent
             if 'temp_path' in download_info:
@@ -286,16 +363,46 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                 if temp_path.exists():
                     try:
                         temp_path.unlink()
-                    except:
-                        pass
+                        logger.info(f"Fichier temporaire supprimé: {temp_path}")
+                    except Exception as e:
+                        logger.error(f"Échec suppression fichier temp {temp_path}: {e}")
             
             # Retirer le téléchargement de la liste active
             if download_id in active_downloads:
                 del active_downloads[download_id]
+                logger.info(f"Téléchargement retiré de active_downloads: {download_id}")
                 
         except Exception as e:
-            logger.error(f"Erreur nettoyage final: {e}")
+            logger.error(f"Erreur nettoyage final: {e}", exc_info=True)
 
+
+async def update_progress(current, total, client, status_msg, completed_msg, filename, sent_files, total_files):
+    try:
+        # Calculer le pourcentage actuel
+        progress = (current / total) * 100 if total > 0 else 0
+        
+        if not hasattr(update_progress, 'last_progress'):
+            update_progress.last_progress = 0
+            
+        if abs(progress - update_progress.last_progress) >= 10 or current == total:
+            update_progress.last_progress = progress
+            
+            progress_text = (
+                f"📦 Envoi des fichiers ({sent_files}/{total_files})\n"
+                f"📄 En cours: {filename[:50]}{'...' if len(filename) > 50 else ''}\n"
+                f"📊 Progression: {progress:.1f}%"
+            )
+            
+            try:
+                await status_msg.edit_text(
+                    f"{completed_msg}\n\n{progress_text}"
+                )
+                logger.debug(f"Progression mise à jour pour {filename}: {progress:.1f}%")
+            except Exception as edit_error:
+                logger.error(f"Erreur édition message progression: {edit_error}")
+                
+    except Exception as e:
+        logger.error(f"Erreur mise à jour progression: {e}")
 
 @Client.on_message(filters.command("cleanup", prefixes=["/", "!"]) & filters.private)
 async def cleanup_command(client: Client, message: Message):
@@ -386,13 +493,18 @@ async def start_command(client: Client, message: Message):
         )
         
 @Client.on_message(filters.text & filters.private)
-async def handle_magnet_links(client: Client, message: Message):
-    """Gère les liens magnet"""
+async def handle_download_requests(client: Client, message: Message):
+    """Gère tous les types de téléchargements (magnet et liens directs)"""
+    user_id = message.from_user.id
+    
+    # Extraction du lien
     magnet_link = extract_magnet_link(message.text)
-    if not magnet_link:
+    direct_link = extract_direct_link(message.text) if not magnet_link else None
+    
+    if not magnet_link and not direct_link:
         return
         
-    user_id = message.from_user.id
+    # Validation du quota utilisateur
     if not await validate_user_quota(user_id):
         await message.reply_text(
             "⚠️ <b>Limite de téléchargements atteinte</b>\n\n"
@@ -403,47 +515,71 @@ async def handle_magnet_links(client: Client, message: Message):
         return
         
     try:
-        # Démarrer le téléchargement
+        # Configuration du dossier de destination
         dl_path = Path(f"downloads/{user_id}")
         dl_path.mkdir(parents=True, exist_ok=True)
         
+        # Détermination du type de téléchargement
+        if magnet_link:
+            source = magnet_link
+            download_type = "magnet"
+            display_name = magnet_link[:50] + ("..." if len(magnet_link) > 50 else "")
+            start_message = "🧲 <b>Lien magnet détecté !</b>"
+        else:
+            source = direct_link
+            download_type = "direct"
+            display_name = Path(urlparse(direct_link).path).name[:50]
+            start_message = "📥 <b>Lien direct détecté !</b>"
+        
+        # Lancement du téléchargement
         download_id = await deps.torrent_client.add(
-            source=magnet_link,
+            source=source,
             path=dl_path,
             paused=False
         )
         
         if not download_id:
-            raise ValueError("Échec de l'ajout du téléchargement")
+            raise ValueError("Échec de l'initialisation du téléchargement")
             
-        # Enregistrer les informations du téléchargement
+        # Enregistrement des métadonnées
         active_downloads[download_id] = {
             'user_id': user_id,
-            'type': 'magnet',
+            'type': download_type,
             'dl_path': str(dl_path),
             'start_time': asyncio.get_event_loop().time(),
-            'name': magnet_link[:50] + "..." if len(magnet_link) > 50 else magnet_link
+            'name': display_name,
+            'source': source
         }
         
-        # Démarrer le suivi de progression
+        # Suivi de progression
         asyncio.create_task(send_progress_update(client, user_id, download_id))
         
-        ms = await message.reply_text(
-            "🧲 <b>Lien magnet détecté !</b>\n\n"
-            "Votre téléchargement a bien été pris en charge.\n"
-            "Vous recevrez des mises à jour régulières.",
+        # Réponse à l'utilisateur
+        response = await message.reply_text(
+            f"{start_message}\n\n"
+            f"Fichier: <code>{display_name}</code>\n"
+            "Statut: En cours de préparation...\n\n"
+            "Vous recevrez des mises à jour automatiques.",
             parse_mode=ParseMode.HTML
         )
+        
+        # Suppression du message après 5 secondes
         await asyncio.sleep(5)
-        await ms.delete()
+        await response.delete()
+        
     except Exception as e:
-        logger.error(f"Magnet error: {e}")
-        await message.reply_text(
+        logger.error(f"Download error [{user_id}]: {str(e)}", exc_info=True)
+        
+        error_message = (
             "❌ <b>Erreur lors du traitement</b>\n\n"
-            f"Impossible de démarrer le téléchargement: {str(e)}",
+            f"Type: {'Magnet' if magnet_link else 'Lien direct'}\n"
+            f"Erreur: {str(e)}"
+        )
+        
+        await message.reply_text(
+            error_message,
             parse_mode=ParseMode.HTML
         )
-
 @Client.on_message(filters.document & filters.private)
 async def handle_torrent_files(client: Client, message: Message):
     """Gère les fichiers torrent"""

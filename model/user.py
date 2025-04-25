@@ -69,7 +69,7 @@ class TorrentFile(MongoModel):
     sel: bool = True
 
 class DLProgress(MongoModel):
-    did: UUID = Field(default_factory=uuid4)
+    did: PyObjId = Field(default_factory=PyObjId, alias="_id")
     magnet: Optional[str] = None
     torrent: Optional[str] = None
     name: str = "Unnamed"
@@ -81,6 +81,9 @@ class DLProgress(MongoModel):
     files: List[TorrentFile] = []
     created: datetime = Field(default_factory=datetime.now)
     updated: datetime = Field(default_factory=datetime.now)
+    
+    class Config:
+        extra = 'ignore'
 
     @validator('name', pre=True)
     def set_name(cls, v, values):

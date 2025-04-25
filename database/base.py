@@ -122,16 +122,22 @@ class MongoDB:
     ) -> bool:
         """Met à jour un document"""
         try:
+            if any(key.startswith("$") for key in update_data):
+                update = update_data
+            else:
+                update = {"$set": update_data}
+
             result = await self.get_collection(collection_name).update_one(
                 query,
-                {"$set": update_data},
+                update,
                 upsert=upsert,
                 **kwargs
             )
             return result.modified_count > 0
         except PyMongoError as e:
-            log.error(f"Failed to update document: {e}")
+            log.error(f"Failed to update document: {e}, full error: {getattr(e, 'details', str(e))}")
             raise
+
 
     async def delete_document(self, collection_name: str, query: Dict, **kwargs) -> bool:
         """Supprime un document"""

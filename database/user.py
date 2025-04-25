@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Union
 from database.base import MongoDB
-from model.user import UserDB, UserCreate, DLProgress, Quotas, Stats, UserUpdate
+from model.user import PyObjId, UserDB, UserCreate, DLProgress, Quotas, Stats, UserUpdate
 from uuid import UUID, uuid4
 from datetime import datetime
 import logging
@@ -119,35 +119,99 @@ class UserManager:
         try:
             user = await self.get_user(uid)
             if user is None:
-                log.warning(f"User {uid} not found")
+                log.warning(f"Utilisateur {uid} non trouvé")
                 return None
             
             if len(user.dl_active) >= user.quotas.max_dls:
-                raise ValueError(f"Maximum downloads reached ({user.quotas.max_dls})")
+                raise ValueError(f"Nombre maximum de téléchargements atteint ({user.quotas.max_dls})")
             
-            download_id = uuid4()
-            download = DLProgress(
-                did=download_id,
+            donnees_propres = {
+                k: v for k, v in download_data.items() 
+                if k not in ['created', 'updated', 'did']
+            }
+            
+            # Création du téléchargement
+            telechargement = DLProgress(
+                did=download_data["did"],
                 created=datetime.now(),
                 updated=datetime.now(),
-                **download_data
+                **donnees_propres
             )
+
             
-            success = await self.db.update_document(
+            # Mise à jour dans la base de données
+            succes = await self.db.update_document(
                 "users",
                 {"uid": uid},
                 {
-                    "$push": {"dl_active": download.dict(by_alias=True)},
+                    "$push": {"dl_active": telechargement.dict(by_alias=True)},
                     "$set": {"updated": datetime.now()}
                 }
             )
-            return download_id if success else None
+            
+            return telechargement.did if succes else None
+            
         except ValueError as e:
-            log.warning(f"Download validation failed: {e}")
+            log.warning(f"Échec de validation du téléchargement: {e}")
             raise
         except Exception as e:
-            log.error(f"Failed to add download: {e}", exc_info=True)
+            log.error(f"Échec de l'ajout du téléchargement: {e}", exc_info=True)
             return None
+    
+    async def remove_download(self, uid: int, download_id: str) -> bool:
+        """Supprime un téléchargement de l'utilisateur"""
+        if not await self._check_connection():
+            return False
+
+        try:
+            user = await self.get_user(uid)
+            if user is None:
+                log.warning(f"Utilisateur {uid} non trouvé")
+                return False
+            
+            download = next((d for d in user.dl_active if d.did == download_id), None)
+            if download is None:
+                log.warning(f"Téléchargement {download_id} non trouvé pour l'utilisateur {uid}")
+                return False
+            
+            return await self.db.update_document(
+                "users",
+                {"uid": uid},
+                {
+                    "$pull": {"dl_active": {"did": download_id}},
+                    "$set": {"updated": datetime.now()}
+                }
+            )
+        except Exception as e:
+            log.error(f"Échec de la suppression du téléchargement: {e}", exc_info=True)
+            return False
+    
+    async def update_download(self, uid: int, download_id: str, update_data: Dict) -> bool:
+        """Met à jour un téléchargement de l'utilisateur"""
+        if not await self._check_connection():
+            return False
+
+        try:
+            user = await self.get_user(uid)
+            if user is None:
+                log.warning(f"Utilisateur {uid} non trouvé")
+                return False
+            
+            download = next((d for d in user.dl_active if d.did == download_id), None)
+            if download is None:
+                log.warning(f"Téléchargement {download_id} non trouvé pour l'utilisateur {uid}")
+                return False
+            
+            update_data["updated"] = datetime.now()
+            
+            return await self.db.update_document(
+                "users",
+                {"uid": uid, "dl_active.did": download_id},
+                {"$set": update_data}
+            )
+        except Exception as e:
+            log.error(f"Échec de la mise à jour du téléchargement: {e}", exc_info=True)
+            return False
 
     async def bulk_update_downloads(self, updates: List[Dict]) -> bool:
         """Met à jour plusieurs téléchargements en une opération"""
