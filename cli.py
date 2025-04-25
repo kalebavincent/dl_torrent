@@ -178,7 +178,6 @@ class TorrentCLI:
                   f"{f['progress']:<8.1f} {f['priority']:<8} {f['path']}")
 
     async def set_priorities(self, tid):
-        """Modifie les priorités des fichiers"""
         await self.show_files(tid)
         try:
             indices = [
