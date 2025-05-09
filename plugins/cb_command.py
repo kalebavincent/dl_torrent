@@ -1,4 +1,5 @@
 import os
+import time
 from urllib.parse import urlparse
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -268,7 +269,7 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                         )
                         continue
                         
-                    if file_size > 2000 * 1024 * 1024:  # 2GB
+                    if file_size > 4 * 1024 * 1024 * 1024:  # 4GB
                         await client.send_message(
                             chat_id=user_id,
                             text=f"⚠️ Fichier trop volumineux pour Telegram: {file_path.name} ({file_size/1024/1024:.1f} MB)"
@@ -516,7 +517,7 @@ async def handle_download_requests(client: Client, message: Message):
         
     try:
         # Configuration du dossier de destination
-        dl_path = Path(f"downloads/{user_id}")
+        dl_path = Path(f"downloads/{user_id}_{int(time.time())}")
         dl_path.mkdir(parents=True, exist_ok=True)
         
         # Détermination du type de téléchargement
@@ -628,12 +629,15 @@ async def handle_torrent_files(client: Client, message: Message):
         # Démarrer le suivi de progression
         asyncio.create_task(send_progress_update(client, user_id, download_id))
         
-        await message.reply_text(
+        response = await message.reply_text(
             "📥 <b>Fichier torrent reçu !</b>\n\n"
             "Votre téléchargement a bien été pris en charge.\n"
             "Vous recevrez des mises à jour régulières.",
             parse_mode=ParseMode.HTML
         )
+        
+        await asyncio.sleep(5)
+        await response.delete()
         
     except Exception as e:
         logger.error(f"Torrent error: {e}")
