@@ -269,7 +269,7 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                         )
                         continue
                         
-                    if file_size > 4 * 1024 * 1024 * 1024:  # 4GB
+                    if file_size > 2000 * 1024 * 1024:  # 2GB
                         await client.send_message(
                             chat_id=user_id,
                             text=f"⚠️ Fichier trop volumineux pour Telegram: {file_path.name} ({file_size/1024/1024:.1f} MB)"
