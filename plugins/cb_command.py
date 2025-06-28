@@ -486,6 +486,34 @@ async def handle_cancel_download(client: Client, callback_query: CallbackQuery):
         logger.error(f"Erreur annulation: {e}")
         await callback_query.answer("❌ Erreur lors de l'annulation", show_alert=True)
 
+@Client.on_message(filters.command("start", prefixes=["/", "!"]) & filters.group)
+async def start_groupe(client: Client, message: Message):
+    await deps.startup()
+    user = message.from_user
+    user_data = UserCreate(
+            uid=user.id,
+            uname=user.username,
+            first=user.first_name or "",
+            last=user.last_name or "",
+            lang_code=user.language_code or "fr",
+            sub=SubTier.FREE,
+            role=Role.USER,
+        )
+    bot_info = await client.get_me()
+    existing_user = await deps.user_manager.get_user(user.id)
+    if not existing_user:
+        await deps.user_manager.create_user(user_data)
+        await message.reply_text(
+            format_message(Messages.WELCOME_NEW, bot_name=bot_info.first_name),
+            reply_markup=get_main_keyboard(is_new_user=True),
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await message.reply_text(
+            format_message(Messages.WELCOME_RETURNING, user_name=user.first_name),
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
 
 @Client.on_message(filters.command("start", prefixes=["/", "!"]) & filters.private)
 async def start_command(client: Client, message: Message):
