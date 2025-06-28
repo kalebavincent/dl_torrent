@@ -36,7 +36,7 @@ class UserManager:
         """Crée les index nécessaires"""
         if not await self._check_connection():
             raise ConnectionError("Failed to connect to database")
-        
+
         try:
             await self.db.create_indexes("users", [
                 {"key": [("uid", 1)], "unique": True},
@@ -59,6 +59,28 @@ class UserManager:
             log.error(f"Failed to get user {uid}: {e}", exc_info=True)
             return None
 
+    async def get_all_users(self) -> List[UserDB]:
+        """Récupère tous les utilisateurs de la base"""
+        if not await self._check_connection():
+            return []
+
+        try:
+            # Attendre d'abord la coroutine find_document
+            cursor = await self.db.find_document("users", {})
+
+            # Vérifier si c'est un vrai curseur MongoDB
+            if hasattr(cursor, 'to_list'):
+                users_data = await cursor.to_list(length=None)
+            else:
+                # Si ce n'est pas un curseur, supposons que c'est déjà une liste
+                users_data = cursor if isinstance(cursor, list) else [cursor]
+
+            return [UserDB(**data) for data in users_data]
+
+        except Exception as e:
+            log.error(f"Failed to get all users: {e}", exc_info=True)
+            return []
+
     async def create_user(self, user_data: UserCreate) -> Optional[UserDB]:
         """Crée un nouvel utilisateur"""
         if not await self._check_connection():
@@ -71,11 +93,11 @@ class UserManager:
                 quotas=quotas,
                 stats=Stats(last_active=datetime.now())
             )
-            
+
             result = await self.db.insert_document("users", user.dict(by_alias=True, exclude={"id"}))
             if not result:
                 raise ValueError("User creation failed")
-                
+
             return user
         except Exception as e:
             log.error(f"Failed to create user: {e}", exc_info=True)
@@ -90,22 +112,22 @@ class UserManager:
 
         try:
             changes = {"updated": datetime.now()}
-            
+
             if update_data.uname is not None:
                 changes["uname"] = update_data.uname
-            
+
             if update_data.sub is not None:
                 changes.update({
                     "sub_tier": update_data.sub,
                     "quotas": self._sub_quotas.get(update_data.sub.value, Quotas()).dict()
                 })
-            
+
             if update_data.settings is not None:
                 changes["settings"] = update_data.settings.dict()
-            
+
             if len(changes) <= 1:
                 return False
-                
+
             return await self.db.update_document("users", {"uid": uid}, changes)
         except Exception as e:
             log.error(f"Failed to update user {uid}: {e}", exc_info=True)
@@ -121,15 +143,15 @@ class UserManager:
             if user is None:
                 log.warning(f"Utilisateur {uid} non trouvé")
                 return None
-            
+
             if len(user.dl_active) >= user.quotas.max_dls:
                 raise ValueError(f"Nombre maximum de téléchargements atteint ({user.quotas.max_dls})")
-            
+
             donnees_propres = {
-                k: v for k, v in download_data.items() 
+                k: v for k, v in download_data.items()
                 if k not in ['created', 'updated', 'did']
             }
-            
+
             # Création du téléchargement
             telechargement = DLProgress(
                 did=download_data["did"],
@@ -138,7 +160,7 @@ class UserManager:
                 **donnees_propres
             )
 
-            
+
             # Mise à jour dans la base de données
             succes = await self.db.update_document(
                 "users",
@@ -148,16 +170,16 @@ class UserManager:
                     "$set": {"updated": datetime.now()}
                 }
             )
-            
+
             return telechargement.did if succes else None
-            
+
         except ValueError as e:
             log.warning(f"Échec de validation du téléchargement: {e}")
             raise
         except Exception as e:
             log.error(f"Échec de l'ajout du téléchargement: {e}", exc_info=True)
             return None
-    
+
     async def remove_download(self, uid: int, download_id: str) -> bool:
         """Supprime un téléchargement de l'utilisateur"""
         if not await self._check_connection():
@@ -168,12 +190,12 @@ class UserManager:
             if user is None:
                 log.warning(f"Utilisateur {uid} non trouvé")
                 return False
-            
+
             download = next((d for d in user.dl_active if d.did == download_id), None)
             if download is None:
                 log.warning(f"Téléchargement {download_id} non trouvé pour l'utilisateur {uid}")
                 return False
-            
+
             return await self.db.update_document(
                 "users",
                 {"uid": uid},
@@ -185,7 +207,7 @@ class UserManager:
         except Exception as e:
             log.error(f"Échec de la suppression du téléchargement: {e}", exc_info=True)
             return False
-    
+
     async def update_download(self, uid: int, download_id: str, update_data: Dict) -> bool:
         """Met à jour un téléchargement de l'utilisateur"""
         if not await self._check_connection():
@@ -196,14 +218,14 @@ class UserManager:
             if user is None:
                 log.warning(f"Utilisateur {uid} non trouvé")
                 return False
-            
+
             download = next((d for d in user.dl_active if d.did == download_id), None)
             if download is None:
                 log.warning(f"Téléchargement {download_id} non trouvé pour l'utilisateur {uid}")
                 return False
-            
+
             update_data["updated"] = datetime.now()
-            
+
             return await self.db.update_document(
                 "users",
                 {"uid": uid, "dl_active.did": download_id},
@@ -232,10 +254,10 @@ class UserManager:
                     }
                 } for u in updates if all(k in u for k in ["uid", "dl_id"])
             ]
-            
+
             if not operations:
                 return False
-                
+
             return await self.db.bulk_write("users", operations)
         except Exception as e:
             log.error(f"Bulk update failed: {e}", exc_info=True)
@@ -251,19 +273,19 @@ class UserManager:
                 user = await self.get_user(uid)
                 if user is None:
                     return False
-                
+
                 download = next((d for d in user.dl_active if d.did == download_id), None)
                 if download is None:
                     return False
-                
+
                 download.status = "completed"
                 download.updated = datetime.now()
-                
+
                 return await self.db.update_document(
                     "users",
                     {"uid": uid},
                     {
-                        "$pull": {"dl_active": {"did": download_id}}, 
+                        "$pull": {"dl_active": {"did": download_id}},
                         "$push": {"dl_done": download.dict(by_alias=True)},
                         "$inc": {
                             "stats.dls": 1,
@@ -273,7 +295,7 @@ class UserManager:
                     },
                     session=session
                 )
-            
+
             return await self.db.execute_transaction(transaction_callback)
         except Exception as e:
             log.error(f"Failed to complete download: {e}", exc_info=True)

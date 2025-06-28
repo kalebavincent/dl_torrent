@@ -491,6 +491,81 @@ class TorrentClient:
             log.error(f"Erreur annulation HTTP: {e}")
             return False
 
+
+    async def get_global_stats(self) -> Dict[str, Any]:
+        """
+        Récupère les statistiques globales du client :
+        - nombre de tâches
+        - total download / upload speed
+        - espace disque
+        - liste des téléchargements actifs et terminés
+        """
+        try:
+            total_dl_speed = 0
+            total_ul_speed = 0
+            active_tasks = []
+            completed_tasks = []
+
+            # Parcourt les torrents
+            for tid, h in self.handles.items():
+                s = h.status()
+                total_dl_speed += s.download_rate / 1024  # kB/s
+                total_ul_speed += s.upload_rate / 1024    # kB/s
+
+                state = TorrentState.COMPLETED if s.is_seeding else TorrentState.DOWNLOADING
+                task_info = {
+                    "id": tid,
+                    "name": h.name(),
+                    "progress": s.progress * 100,
+                    "downloaded": s.total_payload_download / (1024*1024),
+                    "size": s.total_wanted / (1024*1024),
+                    "dl_speed": s.download_rate / 1024,
+                    "ul_speed": s.upload_rate / 1024,
+                    "state": str(state),
+                }
+
+                if state == TorrentState.COMPLETED:
+                    completed_tasks.append(task_info)
+                else:
+                    active_tasks.append(task_info)
+
+            # Parcourt les téléchargements HTTP
+            for task in self.download_tasks.values():
+                if task.type == DownloadType.HTTP:
+                    total_dl_speed += task.speed  # déjà en kB/s
+                    task_info = {
+                        "id": task.id,
+                        "name": task.path.name if task.path else "unknown",
+                        "progress": task.progress,
+                        "downloaded": task.downloaded,
+                        "size": task.total_size,
+                        "dl_speed": task.speed,
+                        "ul_speed": 0,
+                        "state": str(task.state),
+                    }
+
+                    if task.state == TorrentState.COMPLETED:
+                        completed_tasks.append(task_info)
+                    else:
+                        active_tasks.append(task_info)
+
+            # Récupération de l'utilisation disque
+            disk = self._get_disk_usage()
+
+            return {
+                "total_tasks": len(self.handles) + len([t for t in self.download_tasks.values() if t.type == DownloadType.HTTP]),
+                "total_download_speed": total_dl_speed,  # kB/s
+                "total_upload_speed": total_ul_speed,    # kB/s
+                "disk": disk,
+                "active_tasks": active_tasks,
+                "completed_tasks": completed_tasks,
+            }
+
+        except Exception as e:
+            log.error(f"Erreur récupération stats globales: {e}", exc_info=True)
+            return {}
+
+
     async def close(self):
         """Nettoie toutes les ressources."""
         # Fermeture des torrents

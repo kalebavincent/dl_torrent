@@ -16,7 +16,8 @@ class Config:
     MONGO_URI = os.getenv("MONGO_URI", "")
 
     # Liste des administrateurs
-    ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip().isdigit()]
+    ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip().lstrip('-').isdigit()]
+    GROUPS = [int(id) for id in os.getenv("GROUPS", "").split(",") if id.strip().lstrip('-').isdigit()]
 
     # Nombre max de téléchargements actifs selon l'abonnement
     MAX_ACTIVE_DOWNLOADS = {
@@ -31,6 +32,9 @@ class Config:
 
     # Mode webhook (True/False)
     WEBHOOK = os.getenv("WEBHOOK", "False").lower() == "true"
+    WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
+    WEB_PORT = int(os.getenv("WEB_PORT", 8080))
 
 
 config = Config()
+print(f"Configuration chargée: {config.GROUPS}, {config.ADMIN_IDS}")
