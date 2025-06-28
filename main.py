@@ -4,6 +4,7 @@ from bot import Dependencies
 from route import web_server
 from aiohttp import web
 
+
 async def main():
     deps = Dependencies()
     

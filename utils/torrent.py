@@ -34,7 +34,7 @@ class DownloadType(Enum):
 
 class TorrentState(Enum):
     IDLE, METADATA, CHECKING, DOWNLOADING, SEEDING, PAUSED, COMPLETED, ERROR = range(8)
-    
+
     def __str__(self):
         states = {
             0: "En attente", 1: "Métadonnées", 2: "Vérification",
@@ -180,7 +180,7 @@ class TorrentClient:
             # Extraire le nom de fichier de l'URL (en prenant en compte les paramètres)
             parsed_url = urllib.parse.urlparse(url)
             filename = os.path.basename(parsed_url.path)
-            
+
             # Pour CloudConvert, utiliser le filename du paramètre response-content-disposition si présent
             if "cloudconvert.com" in parsed_url.netloc:
                 query_params = urllib.parse.parse_qs(parsed_url.query)
@@ -224,36 +224,36 @@ class TorrentClient:
             # Ajouter des en-têtes spécifiques si nécessaire
             if "freeconvert.com" in url:
                 headers.update({"Referer": "https://www.freeconvert.com/"})
-            
+
             async with self.http_session.get(url, headers=headers) as resp:
                 task.http_task = resp
                 total_size = int(resp.headers.get('content-length', 0))
                 task.total_size = total_size / (1024 * 1024)
-                
+
                 downloaded = 0
                 last_time = asyncio.get_event_loop().time()
-                
+
                 # Créer le répertoire parent si nécessaire
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                
+
                 with open(dest, 'wb') as f:
                     async for chunk in resp.content.iter_chunked(8192):
                         if task.state == TorrentState.ERROR:
                             break
-                            
+
                         f.write(chunk)
                         downloaded += len(chunk)
-                        
+
                         now = asyncio.get_event_loop().time()
                         elapsed = now - last_time
                         last_time = now
-                        
+
                         current_speed = (len(chunk) / max(elapsed, 0.001)) / 1024
-                        
+
                         task.downloaded = downloaded / (1024 * 1024)
                         task.progress = (downloaded / total_size) * 100 if total_size > 0 else 0
                         task.speed = current_speed
-                        
+
                         if cb:
                             cb(self._create_http_stats(task))
 
@@ -262,7 +262,7 @@ class TorrentClient:
                     task.state = TorrentState.COMPLETED
                 else:
                     task.state = TorrentState.ERROR
-                    
+
         except Exception as e:
             log.error(f"Erreur téléchargement HTTP: {e}")
             task.state = TorrentState.ERROR
@@ -271,17 +271,17 @@ class TorrentClient:
                 task.http_task = None
             if cb:
                 cb(self._create_http_stats(task))
-                
+
     def _verify_download(self, file_path: Path, expected_size: int) -> bool:
         """Vérifie si le fichier est complet"""
         if not file_path.exists():
             return False
         return file_path.stat().st_size >= expected_size * 0.95  # Tolère 5% de différence
-            
+
     def _create_http_stats(self, task: DownloadTask) -> TorrentStats:
         # Vérifie si le fichier existe malgré l'erreur
         is_complete = self._verify_download(task.path, task.total_size * 1024 * 1024)
-        
+
         return TorrentStats(
             progress=100 if is_complete else task.progress,
             dl_rate=task.speed,
@@ -369,7 +369,7 @@ class TorrentClient:
         """Logique originale de récupération des stats des torrents."""
         if tid not in self.handles:
             return None
-        
+
         try:
             h, s = self.handles[tid], self.handles[tid].status()
             state_map = {
@@ -395,16 +395,16 @@ class TorrentClient:
 
             return TorrentStats(
                 progress=s.progress * 100,
-                dl_rate=s.download_rate / 1024,  
-                ul_rate=s.upload_rate / 1024,     
+                dl_rate=s.download_rate / 1024,
+                ul_rate=s.upload_rate / 1024,
                 speed=(s.download_rate / 1024) / 1024,
                 eta=((s.total_wanted - s.total_wanted_done) / s.download_rate) if s.download_rate > 0 else float('inf'),
                 peers=s.num_peers,
                 state=state,
-                wanted=s.total_wanted / (1024*1024),      
+                wanted=s.total_wanted / (1024*1024),
                 done=s.total_wanted_done / (1024*1024),
                 downloaded=s.total_payload_download / (1024*1024),
-                uploaded=s.all_time_upload / (1024*1024),  
+                uploaded=s.all_time_upload / (1024*1024),
                 files=files,
                 disk=self._get_disk_usage()
             )
@@ -448,18 +448,18 @@ class TorrentClient:
 
         try:
             h = self.handles[tid]
-            
+
             if wait_resume_data and not delete_data:
                 h.save_resume_data()
-                await asyncio.sleep(1)  
+                await asyncio.sleep(1)
 
             self.session.remove_torrent(h, int(delete_data))
-            
+
             del self.handles[tid]
             self.download_tasks.pop(tid, None)
             log.info(f"Torrent {tid} supprimé (fichiers: {'oui' if delete_data else 'non'})")
             return True
-            
+
         except Exception as e:
             log.error(f"Échec suppression {tid}: {str(e)}", exc_info=True)
             try:
