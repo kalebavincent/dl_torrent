@@ -3,6 +3,7 @@ requests>=2.25.0
 aiohttp>=3.7.0
 tqdm>=4.0.0
 psutil>=5.8.0
+yt_dlp>=2025.6.25
 
 colorama>=0.4.4
 prompt-toolkit>=3.0.0
