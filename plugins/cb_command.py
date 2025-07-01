@@ -355,7 +355,14 @@ async def handle_open_download(client: Client, callback_query: CallbackQuery):
         if download_id not in active_downloads:
             await callback_query.answer("❌ Téléchargement introuvable", show_alert=True)
             return
+
+        # Vérifier les permissions
         download_info = active_downloads[download_id]
+        user_id = callback_query.from_user.id
+        if user_id != download_info["user_id"] and user_id not in deps.config.ADMIN_IDS:
+            await callback_query.answer("🔒 Accès refusé : Vous n'êtes pas propriétaire de ce téléchargement", show_alert=True)
+            return
+
         dl_path = Path(download_info["dl_path"])
         if not dl_path.exists() or not dl_path.is_dir():
             await callback_query.answer("❌ Dossier introuvable", show_alert=True)
@@ -378,6 +385,14 @@ async def handle_cancel_download(client: Client, callback_query: CallbackQuery):
         if download_id not in active_downloads:
             await callback_query.answer("❌ Téléchargement introuvable", show_alert=True)
             return
+
+        # Vérifier les permissions
+        download_info = active_downloads[download_id]
+        user_id = callback_query.from_user.id
+        if user_id != download_info["user_id"] and user_id not in deps.config.ADMIN_IDS:
+            await callback_query.answer("🔒 Accès refusé : Vous n'êtes pas propriétaire de ce téléchargement", show_alert=True)
+            return
+
         stats = await deps.torrent_client.stats(download_id)
         progress = stats.progress if stats else 0
         duration = format_time(active_downloads[download_id].get("duration", 0))
