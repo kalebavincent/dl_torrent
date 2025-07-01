@@ -814,7 +814,7 @@ class TorrentClient:
             disk=self._get_disk_usage(),
             user_id=task.user_id,
             num_files=1,  # HTTP: toujours 1 fichier
-            current_file=current_file  # Ajout du fichier courant
+            current_file=current_file  
         )
 
     async def _get_torrent_stats(self, tid: str) -> Optional[TorrentStats]:
@@ -826,7 +826,6 @@ class TorrentClient:
             h = self.handles[tid]
             s = h.status()
 
-            # Mapper les états libtorrent vers nos états
             state_map = {
                 lt.torrent_status.states.downloading_metadata: TorrentState.METADATA,
                 lt.torrent_status.states.checking_files: TorrentState.CHECKING,
@@ -836,10 +835,8 @@ class TorrentClient:
             }
             state = state_map.get(s.state, TorrentState.PAUSED if s.paused else TorrentState.ERROR)
 
-            # Facteur de conversion pour les MB
             MB = 1024 * 1024
 
-            # Récupérer les informations sur les fichiers
             files = []
             num_files = 0
             current_file = None
@@ -848,11 +845,16 @@ class TorrentClient:
                 info = h.get_torrent_info()
                 num_files = info.num_files()
 
-                # Collecter les informations sur tous les fichiers
+                file_progress_list = h.file_progress()
+                if not isinstance(file_progress_list, list) or len(file_progress_list) != num_files:
+                    file_progress_list = [0] * num_files
+
                 for idx in range(num_files):
                     f = info.file_at(idx)
                     file_size = f.size
-                    file_progress = h.file_progress(idx) * 100
+
+                    progress_bytes = file_progress_list[idx] if idx < len(file_progress_list) else 0
+                    file_progress = (progress_bytes / file_size) * 100 if file_size > 0 else 0
 
                     file_data = {
                         'path': f.path,
@@ -862,23 +864,23 @@ class TorrentClient:
                     }
                     files.append(file_data)
 
-                    # Trouver le fichier actuellement en téléchargement
-                    if file_progress < 100 and (current_file is None or file_progress < current_file['progress']):
-                        current_file = {
-                            'name': os.path.basename(f.path),
-                            'size': file_size,  # octets
-                            'progress': file_progress,
-                            'downloaded': (file_progress / 100) * file_size  # octets
-                        }
+                    if file_progress < 100:
+                        if current_file is None or file_progress < current_file['progress']:
+                            current_file = {
+                                'name': os.path.basename(f.path),
+                                'size': file_size,  # octets
+                                'progress': file_progress,
+                                'downloaded': progress_bytes  # octets
+                            }
 
-            # Si aucun fichier n'est en cours, prendre le premier fichier
             if current_file is None and files:
                 first_file = files[0]
+                size_bytes = first_file['size'] * MB
                 current_file = {
                     'name': os.path.basename(first_file['path']),
-                    'size': first_file['size'] * MB,  # octets
+                    'size': size_bytes,
                     'progress': first_file['progress'],
-                    'downloaded': (first_file['progress'] / 100) * (first_file['size'] * MB)
+                    'downloaded': (first_file['progress'] / 100) * size_bytes
                 }
 
             # Calculer l'ETA
