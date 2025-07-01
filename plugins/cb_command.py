@@ -23,6 +23,8 @@ import math
 import threading
 import psutil
 
+from utils.torrent import DownloadType
+
 deps = get_deps()
 logger = logging.getLogger(__name__)
 
@@ -40,12 +42,6 @@ DIRECT_LINK_REGEX = r"https?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a
 CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9GB (juste en dessous de la limite Telegram)
 LARGE_FILE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 10GB
 
-class DownloadType:
-    TORRENT = "torrent"
-    MAGNET = "magnet"
-    DIRECT = "direct"
-    YOUTUBE = "youtube"
-    ARIA2 = "aria2"
 
 class Messages:
     """Classe contenant tous les templates de messages"""
@@ -246,11 +242,11 @@ def is_torrent_file(filename: str) -> bool:
 
 async def get_download_type(source: str) -> str:
     if extract_magnet_link(source):
-        return DownloadType.MAGNET
+        return DownloadType.TORRENT
     elif extract_direct_link(source):
-        return DownloadType.DIRECT
+        return DownloadType.HTTP
     elif extract_youtube_link(source):
-        return DownloadType.YOUTUBE
+        return DownloadType.YOUTUBE_DL
     elif is_torrent_file(source):
         return DownloadType.TORRENT
     return DownloadType.ARIA2
@@ -529,7 +525,7 @@ async def handle_download_requests(client: Client, message: Message):
     user = message.from_user
     text = message.text.strip()
     download_type = await get_download_type(text)
-    if download_type not in [DownloadType.MAGNET, DownloadType.DIRECT, DownloadType.YOUTUBE]:
+    if download_type not in [DownloadType.TORRENT, DownloadType.HTTP, DownloadType.YOUTUBE_DL]:
         return
     if not await validate_user_quota(user.id):
         await message.reply_text(
@@ -541,17 +537,17 @@ async def handle_download_requests(client: Client, message: Message):
     try:
         dl_path = Path(f"downloads/{user.id}_{int(time.time())}")
         dl_path.mkdir(parents=True, exist_ok=True)
-        if download_type == DownloadType.MAGNET:
+        if download_type == DownloadType.TORRENT:
             start_msg = format_message(Messages.MAGNET_DETECTED)
-        elif download_type == DownloadType.DIRECT:
+        elif download_type == DownloadType.HTTP:
             start_msg = format_message(Messages.DIRECT_LINK_DETECTED)
-        elif download_type == DownloadType.YOUTUBE:
+        elif download_type == DownloadType.YOUTUBE_DL:
             start_msg = format_message(Messages.YOUTUBE_LINK_DETECTED)
         download_id = await deps.torrent_client.add(
             text,
-            str(dl_path),
+            dl_path,
             download_type=download_type,
-            user_id=user.id,
+            user_id=str(user.id)
         )
         if not download_id:
             raise ValueError("Échec de l'initialisation")
@@ -566,7 +562,7 @@ async def handle_download_requests(client: Client, message: Message):
             "ready_files": []
         }
         keyboard = []
-        if download_type == DownloadType.YOUTUBE:
+        if download_type == DownloadType.YOUTUBE_DL:
             keyboard.append([
                 InlineKeyboardButton("🎥 MP4 HD", callback_data=f"convert_{download_id}_mp4_hd"),
                 InlineKeyboardButton("🎵 MP3", callback_data=f"convert_{download_id}_mp3_medium")
@@ -594,7 +590,7 @@ async def handle_download_requests(client: Client, message: Message):
         await message.reply_text(
             format_message(
                 Messages.DOWNLOAD_ERROR,
-                download_type=download_type.capitalize(),
+                download_type=download_type.name,
                 error=str(e),
             ),
             parse_mode=ParseMode.HTML,
@@ -619,7 +615,7 @@ async def handle_torrent_files(client: Client, message: Message):
         await message.download(file_name=str(temp_path))
         dl_path = Path(f"downloads/{user.id}")
         dl_path.mkdir(parents=True, exist_ok=True)
-        download_id = await deps.torrent_client.add(str(temp_path), str(dl_path))
+        download_id = await deps.torrent_client.add(str(temp_path), dl_path)
         if not download_id:
             raise ValueError("Échec de l'ajout")
         active_downloads[download_id] = {
@@ -672,8 +668,11 @@ async def send_progress_update(client: Client, user_id: int, download_id: str, m
             stats = await deps.torrent_client.stats(download_id)
             if not stats:
                 break
+
             current_time = asyncio.get_event_loop().time()
             active_downloads[download_id]["duration"] = current_time - start_time
+
+            # Formatage des données de progression
             progress_data = {
                 "name": active_downloads[download_id]["name"],
                 "progress_bar": create_progress_bar(stats.progress),
@@ -685,56 +684,91 @@ async def send_progress_update(client: Client, user_id: int, download_id: str, m
                 "file_progress": "",
                 "ready_files": ""
             }
-            if hasattr(stats, "current_file") and stats.current_file:
+
+            # Affichage du fichier courant
+            if stats.current_file:
                 progress_data["file_progress"] = (
                     f"\n📄 Fichier actuel: {stats.current_file['name']}\n"
                     f"{create_progress_bar(stats.current_file['progress'])}"
                     f"\n{format_size(stats.current_file['downloaded'])}/{format_size(stats.current_file['size'])}"
                 )
+
+            # Liste des fichiers prêts à être envoyés
             ready_files_list = []
-            if hasattr(stats, "files") and stats.files:
+            if stats.files:
                 for file in stats.files:
-                    if file['progress'] >= 100 and file['path'] not in active_downloads[download_id]['completed_files']:
+                    # Vérification de type robuste pour la progression
+                    progress_value = file['progress']
+                    if isinstance(progress_value, list):
+                        progress_value = progress_value[0]  # Prendre le premier élément si liste
+                    elif not isinstance(progress_value, (int, float)):
+                        try:
+                            progress_value = float(progress_value)
+                        except (TypeError, ValueError):
+                            progress_value = 0
+
+                    if progress_value >= 100 and file['path'] not in active_downloads[download_id]['completed_files']:
                         active_downloads[download_id]['completed_files'].append(file['path'])
                         active_downloads[download_id]['ready_files'].append(file['path'])
-                        ready_files_list.append(f"✅ {file['path']}")
+                        ready_files_list.append(f"✅ {os.path.basename(file['path'])}")
+
             if ready_files_list:
                 progress_data["ready_files"] = "\n\n📂 Fichiers prêts à l'envoi:\n" + "\n".join(ready_files_list[:3])
                 if len(ready_files_list) > 3:
                     progress_data["ready_files"] += f"\n... et {len(ready_files_list) - 3} autres"
-            if active_downloads[download_id].get("type") == DownloadType.YOUTUBE:
+
+            # Informations spécifiques à YouTube
+            if active_downloads[download_id].get("type") == DownloadType.YOUTUBE_DL:
                 progress_data["name"] = "Vidéo YouTube"
                 if active_downloads[download_id].get("metadata"):
                     meta = active_downloads[download_id]["metadata"]
                     progress_data["name"] = meta.get("title", "Vidéo YouTube")
+
+                    # Formatage de la durée
+                    duration = meta.get("duration", 0)
+                    minutes, seconds = divmod(duration, 60)
+                    formatted_duration = f"{minutes}min{seconds:02d}s"
+
+                    # Ajout des métadonnées
                     progress_data["file_progress"] += (
                         f"\n🎬 Chaîne: {meta.get('uploader', 'Inconnu')}"
-                        f"\n⏱ Durée: {meta.get('duration', 0)} secondes"
+                        f"\n⏱ Durée: {formatted_duration}"
                     )
+
+            # Mise à jour du message toutes les 5 secondes ou quand le téléchargement est presque fini
             if time.time() - last_update > 5 or stats.progress >= 99.9:
+                # Création du clavier
+                keyboard = [
+                    [
+                        InlineKeyboardButton("🔄 Actualiser", callback_data=f"refresh_{download_id}"),
+                        InlineKeyboardButton("📂 Ouvrir", callback_data=f"open_{download_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
+                    ]
+                ]
+
+                # Ajout du bouton "Envoyer fichiers" s'il y a des fichiers prêts
+                if ready_files_list:
+                    keyboard.insert(1, [
+                        InlineKeyboardButton("📤 Envoyer fichiers", callback_data=f"send_{download_id}")
+                    ])
+
                 await msg.edit_text(
                     format_message(Messages.PROGRESS_TEMPLATE, **progress_data),
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton("🔄 Actualiser", callback_data=f"refresh_{download_id}"),
-                                InlineKeyboardButton("📂 Ouvrir", callback_data=f"open_{download_id}"),
-                            ],
-                            [
-                                InlineKeyboardButton("📤 Envoyer fichiers", callback_data=f"send_{download_id}"),
-                                InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
-                            ],
-                        ]
-                    ),
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
                 last_update = time.time()
+
+            # Fin du téléchargement
             if stats.progress >= 99.9:
                 await handle_download_complete(client, user_id, download_id, msg)
                 break
+
             await asyncio.sleep(5)
         except Exception as e:
-            logger.error(f"Erreur mise à jour: {str(e)}")
+            logger.error(f"Erreur mise à jour: {str(e)}", exc_info=True)
             break
 
 async def split_large_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> List[Path]:
@@ -819,7 +853,7 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                 [InlineKeyboardButton("📤 Envoyer fichiers", callback_data=f"send_{download_id}")]
             ])
         )
-        if download_info.get("type") == DownloadType.YOUTUBE and download_info.get("thumbnail"):
+        if download_info.get("type") == DownloadType.YOUTUBE_DL and download_info.get("thumbnail"):
             try:
                 await client.send_photo(
                     chat_id=user_id,

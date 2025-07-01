@@ -87,6 +87,8 @@ class TorrentStats:
     disk: Optional[Dict] = None
     user_id: Optional[str] = None
     metadata: dict = field(default_factory=dict)
+    num_files: int = 0  # Ajout d'un champ pour le nombre de fichiers
+    current_file: Optional[Dict] = None  # Nouveau champ pour le fichier en cours
 
     def __str__(self):
         disk = f"\nDisque: {self.disk['used']:.1f}/{self.disk['total']:.1f}GB ({self.disk['percent']}%)" if self.disk else ""
@@ -239,64 +241,84 @@ class TorrentClient:
 
     async def add(self, source: str, path: Optional[Path] = None,
                 paused=False, cb=None, user_id: str = None,
-                download_type: str = None) -> Optional[str]:
+                download_type: DownloadType = None) -> Optional[str]:
         """Ajoute un téléchargement avec détection automatique du type"""
-        # Vérification quota utilisateur
-        if user_id and user_id in self.user_tasks and len(self.user_tasks[user_id]) >= self.max_tasks_per_user:
-            log.warning(f"User {user_id} reached task limit ({self.max_tasks_per_user})")
+        try:
+            # Vérification de l'espace disque
+            if not self._disk_space(100 * 1024 * 1024):  # Vérifier 100MB minimum
+                log.error("Espace disque insuffisant")
+                return None
+
+            # Vérification quota utilisateur
+            if user_id and user_id in self.user_tasks and len(self.user_tasks[user_id]) >= self.max_tasks_per_user:
+                log.warning(f"User {user_id} a atteint la limite de tâches ({self.max_tasks_per_user})")
+                return None
+
+            # Détection automatique du type
+            if not download_type:
+                if source.endswith('.torrent') or source.startswith('magnet:'):
+                    download_type = DownloadType.TORRENT
+                elif self._is_youtube_url(source):
+                    download_type = DownloadType.YOUTUBE_DL
+                elif source.startswith(('http://', 'https://')):
+                    download_type = DownloadType.HTTP
+                else:
+                    download_type = DownloadType.ARIA2
+
+            # Vérification des limites globales
+            type_counts = {
+                DownloadType.TORRENT: len([t for t in self.download_tasks.values() if t.type == DownloadType.TORRENT]),
+                DownloadType.HTTP: len([t for t in self.download_tasks.values() if t.type == DownloadType.HTTP]),
+                DownloadType.YOUTUBE_DL: len([t for t in self.download_tasks.values() if t.type == DownloadType.YOUTUBE_DL]),
+                DownloadType.ARIA2: len([t for t in self.download_tasks.values() if t.type == DownloadType.ARIA2])
+            }
+
+            if download_type == DownloadType.TORRENT and type_counts[DownloadType.TORRENT] >= self.max_torrents:
+                log.warning("Limite de torrents atteinte")
+                return None
+            elif download_type == DownloadType.HTTP and type_counts[DownloadType.HTTP] >= self.max_http_downloads:
+                log.warning("Limite de téléchargements HTTP atteinte")
+                return None
+            elif download_type == DownloadType.YOUTUBE_DL and type_counts[DownloadType.YOUTUBE_DL] >= self.max_youtube_dl_downloads:
+                log.warning("Limite de téléchargements YouTube-DL atteinte")
+                return None
+            elif download_type == DownloadType.ARIA2 and type_counts[DownloadType.ARIA2] >= self.max_aria2_downloads:
+                log.warning("Limite de téléchargements Aria2 atteinte")
+                return None
+
+            # Création du chemin de destination
+            if path is None:
+                path = self.dl_dir / f"user_{user_id or 'unknown'}_{int(time.time())}"
+
+            # Création du dossier si nécessaire
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                log.error(f"Impossible de créer le dossier {path}: {str(e)}")
+                return None
+
+            # Ajout de la tâche
+            task_id = None
+            if download_type == DownloadType.TORRENT:
+                task_id = await self._add_torrent(source, path, paused, cb, user_id)
+            elif download_type == DownloadType.HTTP:
+                task_id = await self._add_http_download(source, path, cb, user_id)
+            elif download_type == DownloadType.YOUTUBE_DL:
+                task_id = await self._add_youtube_dl_download(source, path, cb, user_id)
+            elif download_type == DownloadType.ARIA2:
+                task_id = await self._add_aria2_download(source, path, cb, user_id)
+
+            # Enregistrement pour l'utilisateur
+            if task_id and user_id:
+                if user_id not in self.user_tasks:
+                    self.user_tasks[user_id] = []
+                self.user_tasks[user_id].append(task_id)
+                self.download_tasks[task_id].user_id = user_id
+
+            return task_id
+        except Exception as e:
+            log.error(f"Erreur critique dans add(): {str(e)}", exc_info=True)
             return None
-
-        # Détection automatique du type
-        if not download_type:
-            if source.endswith('.torrent') or source.startswith('magnet:'):
-                download_type = "torrent"
-            elif self._is_youtube_url(source):
-                download_type = "youtube_dl"
-            elif source.startswith(('http://', 'https://')):
-                download_type = "http"
-            else:
-                download_type = "aria2"
-
-        # Vérification des limites globales
-        type_counts = {
-            DownloadType.TORRENT: len([t for t in self.download_tasks.values() if t.type == DownloadType.TORRENT]),
-            DownloadType.HTTP: len([t for t in self.download_tasks.values() if t.type == DownloadType.HTTP]),
-            DownloadType.YOUTUBE_DL: len([t for t in self.download_tasks.values() if t.type == DownloadType.YOUTUBE_DL]),
-            DownloadType.ARIA2: len([t for t in self.download_tasks.values() if t.type == DownloadType.ARIA2])
-        }
-
-        if download_type == "torrent" and type_counts[DownloadType.TORRENT] >= self.max_torrents:
-            log.warning("Max torrents reached")
-            return None
-        elif download_type == "http" and type_counts[DownloadType.HTTP] >= self.max_http_downloads:
-            log.warning("Max HTTP downloads reached")
-            return None
-        elif download_type == "youtube_dl" and type_counts[DownloadType.YOUTUBE_DL] >= self.max_youtube_dl_downloads:
-            log.warning("Max YouTube-DL downloads reached")
-            return None
-        elif download_type == "aria2" and type_counts[DownloadType.ARIA2] >= self.max_aria2_downloads:
-            log.warning("Max Aria2 downloads reached")
-            return None
-
-        # Ajout de la tâche
-        task_id = None
-        if download_type == "torrent":
-            task_id = await self._add_torrent(source, path, paused, cb, user_id)
-        elif download_type == "http":
-            task_id = await self._add_http_download(source, path, cb, user_id)
-        elif download_type == "youtube_dl":
-            task_id = await self._add_youtube_dl_download(source, path, cb, user_id)
-        elif download_type == "aria2":
-            task_id = await self._add_aria2_download(source, path, cb, user_id)
-
-        # Enregistrement pour l'utilisateur
-        if task_id and user_id:
-            if user_id not in self.user_tasks:
-                self.user_tasks[user_id] = []
-            self.user_tasks[user_id].append(task_id)
-            self.download_tasks[task_id].user_id = user_id
-
-        return task_id
 
     def _is_youtube_url(self, url: str) -> bool:
         patterns = [
@@ -489,10 +511,21 @@ class TorrentClient:
                 asyncio.run_coroutine_threadsafe(cb(stats), asyncio.get_event_loop())
 
     def _create_ytdlp_stats(self, task: DownloadTask) -> TorrentStats:
+        """Crée les stats pour un téléchargement YouTube-DL"""
+        # Calculer ETA
         eta = 0
         if task.speed > 0 and task.total_size > task.downloaded:
             eta = (task.total_size - task.downloaded) * 1024 / task.speed
 
+        # Créer les informations du fichier courant
+        current_file = {
+            'name': task.path.name if task.path else "unknown",
+            'size': task.total_size * 1024 * 1024,  # octets
+            'progress': task.progress,
+            'downloaded': task.downloaded * 1024 * 1024  # octets
+        }
+
+        # Créer la liste des fichiers
         files = []
         if task.path and task.path.exists():
             files.append({
@@ -516,7 +549,9 @@ class TorrentClient:
             files=files,
             disk=self._get_disk_usage(),
             user_id=task.user_id,
-            metadata=task.metadata
+            metadata=task.metadata,
+            num_files=1,  # YouTube-DL: généralement 1 fichier
+            current_file=current_file  # Ajout du fichier courant
         )
 
     async def _add_aria2_download(self, url: str, path: Optional[Path],
@@ -635,53 +670,78 @@ class TorrentClient:
             user_id=task.user_id
         )
 
-    async def _add_torrent(self, source: str, path: Optional[Path],
-                         paused: bool, cb: Optional[Callable], user_id: str) -> Optional[str]:
-            """Ajout de torrent avec gestion multi-utilisateurs"""
-            try:
-                p = Path(path) if path else self.dl_dir
-                p = p.absolute()
-                p.mkdir(parents=True, exist_ok=True)
+    async def _add_torrent(self, source: str, path: Path,
+                        paused: bool, cb: Optional[Callable], user_id: str) -> Optional[str]:
+        """Ajout de torrent avec gestion multi-utilisateurs"""
+        try:
+            # Création du dossier de destination
+            path.mkdir(parents=True, exist_ok=True)
+            log.info(f"Chemin de téléchargement : {path}")
 
-                # Vérification espace disque pour les torrents non-magnet
-                if not source.startswith('magnet:'):
-                    info = await asyncio.get_event_loop().run_in_executor(
-                        self.executor, self._get_info, source)
-                    if info and not self._disk_space(info.total_size()):
-                        raise RuntimeError("Espace disque insuffisant")
+            # Vérification espace disque pour tous les types
+            if not self._disk_space(100 * 1024 * 1024):
+                raise RuntimeError("Espace disque insuffisant")
 
-                params = {
-                    'save_path': str(p),
-                    'storage_mode': lt.storage_mode_t.storage_mode_sparse,
-                    'trackers': self.trackers
-                }
+            params = {
+                'save_path': str(path),
+                'storage_mode': lt.storage_mode_t.storage_mode_sparse,
+                'trackers': self.trackers
+            }
 
-                # Ajout basé sur le type de source
-                if source.startswith('magnet:'):
+            # Gestion séparée des magnets
+            if source.startswith('magnet:'):
+                log.info(f"Ajout magnétiseur: {source[:60]}...")
+                try:
+                    # Ajout direct du magnet
                     h = lt.add_magnet_uri(self.session, source, params)
-                else:
-                    if not info: return None
-                    params['ti'] = info
-                    h = self.session.add_torrent(params)
+                    await asyncio.sleep(1)  # Laisse le temps à la session
 
-                tid = hashlib.sha256(h.info_hash().to_bytes()).hexdigest()[:16]
-                self.handles[tid] = h
-                self.download_tasks[tid] = DownloadTask(
-                    type=DownloadType.TORRENT,
-                    id=tid,
-                    handle=h,
-                    state=TorrentState.DOWNLOADING,
-                    user_id=user_id
-                )
-                log.info(f"Torrent ajouté {tid}: {h.name()}")
+                except RuntimeError as e:
+                    log.error(f"Erreur ajout magnétiseur: {e}")
+                    return None
+            else:
+                # Téléchargement du .torrent
+                log.info(f"Téléchargement fichier torrent: {source}")
+                info = await asyncio.get_event_loop().run_in_executor(
+                    self.executor, self._get_info, source)
 
-                # Démarrer le suivi de progression
-                if cb and not paused:
-                    asyncio.create_task(self._progress(tid, cb))
-                return tid
-            except Exception as e:
-                log.error(f"Erreur ajout torrent: {e}", exc_info=True)
+                if not info:
+                    log.error("Échec récupération info torrent")
+                    return None
+
+                # Ajout avec les métadonnées
+                params['ti'] = info
+                h = self.session.add_torrent(params)
+
+            # Création de l'ID de tâche
+            if not h.is_valid():
+                log.error("Handle torrent invalide")
                 return None
+
+            tid = hashlib.sha256(h.info_hash().to_bytes()).hexdigest()[:16]
+            self.handles[tid] = h
+
+            # Création de la tâche
+            self.download_tasks[tid] = DownloadTask(
+                type=DownloadType.TORRENT,
+                id=tid,
+                handle=h,
+                state=TorrentState.DOWNLOADING,
+                user_id=user_id,
+                path=path
+            )
+
+            log.info(f"Torrent ajouté {tid}: {h.name()}")
+
+            # Démarrer le suivi de progression
+            if cb and not paused:
+                asyncio.create_task(self._progress(tid, cb))
+
+            return tid
+
+        except Exception as e:
+            log.error(f"Erreur ajout torrent: {e}", exc_info=True)
+            return None
 
     async def _progress(self, tid: str, cb: Callable, interval=5):
         """Suivi de progression pour les torrents"""
@@ -726,6 +786,14 @@ class TorrentClient:
         if task.speed > 0 and task.total_size > task.downloaded:
             eta = ((task.total_size - task.downloaded) * 1024) / max(task.speed, 0.001)
 
+        # Créer les informations du fichier courant
+        current_file = {
+            'name': task.path.name if task.path else "unknown",
+            'size': task.total_size * 1024 * 1024,  # octets
+            'progress': 100 if task.state == TorrentState.COMPLETED else task.progress,
+            'downloaded': task.downloaded * 1024 * 1024  # octets
+        }
+
         return TorrentStats(
             progress=100 if task.state == TorrentState.COMPLETED else task.progress,
             dl_rate=task.speed,
@@ -744,7 +812,9 @@ class TorrentClient:
                 'progress': 100 if task.state == TorrentState.COMPLETED else task.progress
             }],
             disk=self._get_disk_usage(),
-            user_id=task.user_id
+            user_id=task.user_id,
+            num_files=1,  # HTTP: toujours 1 fichier
+            current_file=current_file  # Ajout du fichier courant
         )
 
     async def _get_torrent_stats(self, tid: str) -> Optional[TorrentStats]:
@@ -766,18 +836,50 @@ class TorrentClient:
             }
             state = state_map.get(s.state, TorrentState.PAUSED if s.paused else TorrentState.ERROR)
 
+            # Facteur de conversion pour les MB
+            MB = 1024 * 1024
+
             # Récupérer les informations sur les fichiers
             files = []
+            num_files = 0
+            current_file = None
+
             if h.has_metadata():
                 info = h.get_torrent_info()
-                for idx in range(info.num_files()):
+                num_files = info.num_files()
+
+                # Collecter les informations sur tous les fichiers
+                for idx in range(num_files):
                     f = info.file_at(idx)
-                    files.append({
+                    file_size = f.size
+                    file_progress = h.file_progress(idx) * 100
+
+                    file_data = {
                         'path': f.path,
-                        'size': f.size / (1024*1024),  # MB
+                        'size': file_size / MB,  # MB
                         'priority': h.file_priority(idx),
-                        'progress': h.file_progress(idx) * 100
-                    })
+                        'progress': file_progress
+                    }
+                    files.append(file_data)
+
+                    # Trouver le fichier actuellement en téléchargement
+                    if file_progress < 100 and (current_file is None or file_progress < current_file['progress']):
+                        current_file = {
+                            'name': os.path.basename(f.path),
+                            'size': file_size,  # octets
+                            'progress': file_progress,
+                            'downloaded': (file_progress / 100) * file_size  # octets
+                        }
+
+            # Si aucun fichier n'est en cours, prendre le premier fichier
+            if current_file is None and files:
+                first_file = files[0]
+                current_file = {
+                    'name': os.path.basename(first_file['path']),
+                    'size': first_file['size'] * MB,  # octets
+                    'progress': first_file['progress'],
+                    'downloaded': (first_file['progress'] / 100) * (first_file['size'] * MB)
+                }
 
             # Calculer l'ETA
             eta = float('inf')
@@ -789,20 +891,22 @@ class TorrentClient:
                 progress=s.progress * 100,
                 dl_rate=s.download_rate / 1024,  # kB/s
                 ul_rate=s.upload_rate / 1024,    # kB/s
-                speed=s.download_rate / (1024*1024),  # MB/s
+                speed=s.download_rate / MB,  # MB/s
                 eta=eta,
                 peers=s.num_peers,
                 state=state,
-                wanted=s.total_wanted / (1024*1024),  # MB
-                done=s.total_wanted_done / (1024*1024),  # MB
-                downloaded=s.total_payload_download / (1024*1024),  # MB
-                uploaded=s.all_time_upload / (1024*1024),  # MB
+                wanted=s.total_wanted / MB,  # MB
+                done=s.total_wanted_done / MB,  # MB
+                downloaded=s.total_payload_download / MB,  # MB
+                uploaded=s.all_time_upload / MB,  # MB
                 files=files,
                 disk=self._get_disk_usage(),
-                user_id=self.download_tasks[tid].user_id
+                user_id=self.download_tasks[tid].user_id,
+                num_files=num_files,
+                current_file=current_file
             )
         except Exception as e:
-            log.error(f"Erreur stats torrent: {e}")
+            log.error(f"Erreur stats torrent: {e}", exc_info=True)
             return None
 
     def _get_disk_usage(self) -> Optional[Dict]:
