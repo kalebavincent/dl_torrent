@@ -1,8 +1,29 @@
+import math
 import os
 import sys
 import time
 import subprocess
 import shutil
+import tarfile
+import zipfile
+import aiohttp
+import asyncio
+import hashlib
+import logging
+import logging.handlers
+import signal
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from typing import Optional, List, Dict, Tuple, Callable, Union, Any
+import libtorrent as lt
+import psutil
+import requests
+import urllib
+import yt_dlp
 from urllib.parse import urlparse
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -14,16 +35,7 @@ from pyrogram.types import (
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
 from bot import get_deps
 from model.user import Role, SubTier, UserCreate
-from typing import Any, Optional, Dict, List, Tuple
-import logging
-import re
-import asyncio
-from pathlib import Path
-import math
-import threading
-import psutil
-
-from utils.torrent import DownloadType
+from utils.torrent import DownloadType, TorrentClient, TorrentStats
 
 deps = get_deps()
 logger = logging.getLogger(__name__)
@@ -269,15 +281,16 @@ def format_speed(speed: float) -> str:
     else:
         return f"{speed/(1024*1024):.1f} MB/s"
 
-def format_size(size: float) -> str:
-    if size < 1024:
-        return f"{size:.1f} B"
-    elif size < 1024 * 1024:
-        return f"{size/1024:.1f} KB"
-    elif size < 1024 * 1024 * 1024:
-        return f"{size/(1024*1024):.1f} MB"
+def format_size(size_bytes: float) -> str:
+    """Formate une taille en octets en chaîne lisible"""
+    if size_bytes < 1024:
+        return f"{size_bytes:.0f} B"
+    elif size_bytes < 1024*1024:
+        return f"{size_bytes/1024:.1f} KB"
+    elif size_bytes < 1024*1024*1024:
+        return f"{size_bytes/(1024*1024):.1f} MB"
     else:
-        return f"{size/(1024*1024*1024):.1f} GB"
+        return f"{size_bytes/(1024*1024*1024):.1f} GB"
 
 def format_time(seconds: float) -> str:
     if seconds == float("inf"):
@@ -338,7 +351,7 @@ async def handle_open_download(client: Client, callback_query: CallbackQuery):
             return
         download_info = active_downloads[download_id]
         dl_path = Path(download_info["dl_path"])
-        if not dl_path.exists():
+        if not dl_path.exists() or not dl_path.is_dir():
             await callback_query.answer("❌ Dossier introuvable", show_alert=True)
             return
         if os.name == "nt":
@@ -368,16 +381,15 @@ async def handle_cancel_download(client: Client, callback_query: CallbackQuery):
                 dl_info = active_downloads[download_id]
                 try:
                     dl_path = Path(dl_info["dl_path"])
-                    if dl_path.exists():
-                        if not any(dl_path.iterdir()):
-                            dl_path.rmdir()
+                    if dl_path.exists() and dl_path.is_dir():
+                        shutil.rmtree(dl_path, ignore_errors=True)
                 except Exception as e:
                     logger.error(f"Erreur nettoyage dossier: {e}")
                 if "temp_path" in dl_info:
                     try:
                         temp_path = Path(dl_info["temp_path"])
                         if temp_path.exists():
-                            temp_path.unlink()
+                            temp_path.unlink(missing_ok=True)
                     except Exception as e:
                         logger.error(f"Erreur suppression temp: {e}")
                 name = dl_info.get("name", "Inconnu")
@@ -535,22 +547,31 @@ async def handle_download_requests(client: Client, message: Message):
         )
         return
     try:
-        dl_path = Path(f"downloads/{user.id}_{int(time.time())}")
+        # Créer un dossier unique avec timestamp
+        timestamp = int(time.time())
+        dl_path = Path("downloads") / f"{user.id}_{timestamp}"
         dl_path.mkdir(parents=True, exist_ok=True)
+
+        # Déterminer le type de téléchargement
         if download_type == DownloadType.TORRENT:
             start_msg = format_message(Messages.MAGNET_DETECTED)
         elif download_type == DownloadType.HTTP:
             start_msg = format_message(Messages.DIRECT_LINK_DETECTED)
         elif download_type == DownloadType.YOUTUBE_DL:
             start_msg = format_message(Messages.YOUTUBE_LINK_DETECTED)
+
+        # Ajouter le téléchargement
         download_id = await deps.torrent_client.add(
-            text,
-            dl_path,
+            source=text,
+            path=dl_path,
             download_type=download_type,
             user_id=str(user.id)
         )
+
         if not download_id:
-            raise ValueError("Échec de l'initialisation")
+            raise ValueError("Échec de l'ajout du téléchargement")
+
+        # Enregistrer le téléchargement
         active_downloads[download_id] = {
             "user_id": user.id,
             "type": download_type,
@@ -561,12 +582,15 @@ async def handle_download_requests(client: Client, message: Message):
             "completed_files": [],
             "ready_files": []
         }
+
+        # Construire le clavier
         keyboard = []
         if download_type == DownloadType.YOUTUBE_DL:
             keyboard.append([
                 InlineKeyboardButton("🎥 MP4 HD", callback_data=f"convert_{download_id}_mp4_hd"),
                 InlineKeyboardButton("🎵 MP3", callback_data=f"convert_{download_id}_mp3_medium")
             ])
+
         keyboard.extend([
             [
                 InlineKeyboardButton("🔄 Actualiser", callback_data=f"refresh_{download_id}"),
@@ -576,12 +600,16 @@ async def handle_download_requests(client: Client, message: Message):
                 InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
             ]
         ])
+
+        # Envoyer la réponse
         response = await message.reply_text(
             start_msg,
             parse_mode=ParseMode.HTML,
             reply_to_message_id=message.id,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+        # Démarrer le suivi de progression
         asyncio.create_task(
             send_progress_update(client, user.id, download_id, response)
         )
@@ -610,14 +638,22 @@ async def handle_torrent_files(client: Client, message: Message):
         )
         return
     try:
-        temp_path = Path(f"temp/{user.id}_{message.document.file_name}")
+        # Créer un dossier temporaire
+        temp_path = Path(f"temp/{user.id}_{int(time.time())}_{message.document.file_name}")
         temp_path.parent.mkdir(parents=True, exist_ok=True)
         await message.download(file_name=str(temp_path))
-        dl_path = Path(f"downloads/{user.id}")
+
+        # Créer un dossier de destination unique
+        timestamp = int(time.time())
+        dl_path = Path("downloads") / f"{user.id}_{timestamp}"
         dl_path.mkdir(parents=True, exist_ok=True)
+
+        # Ajouter le torrent
         download_id = await deps.torrent_client.add(str(temp_path), dl_path)
         if not download_id:
-            raise ValueError("Échec de l'ajout")
+            raise ValueError("Échec de l'ajout du torrent")
+
+        # Enregistrer le téléchargement
         active_downloads[download_id] = {
             "user_id": user.id,
             "type": "torrent",
@@ -628,6 +664,8 @@ async def handle_torrent_files(client: Client, message: Message):
             "completed_files": [],
             "ready_files": []
         }
+
+        # Envoyer la réponse
         response = await message.reply_text(
             format_message(Messages.TORRENT_RECEIVED),
             parse_mode=ParseMode.HTML,
@@ -644,6 +682,8 @@ async def handle_torrent_files(client: Client, message: Message):
                 ]
             ),
         )
+
+        # Démarrer le suivi de progression
         asyncio.create_task(
             send_progress_update(client, user.id, download_id, response)
         )
@@ -657,7 +697,7 @@ async def handle_torrent_files(client: Client, message: Message):
             reply_to_message_id=message.id,
         )
         if "temp_path" in locals() and temp_path.exists():
-            temp_path.unlink()
+            temp_path.unlink(missing_ok=True)
 
 async def send_progress_update(client: Client, user_id: int, download_id: str, msg: Message):
     start_time = asyncio.get_event_loop().time()
@@ -771,24 +811,28 @@ async def send_progress_update(client: Client, user_id: int, download_id: str, m
             logger.error(f"Erreur mise à jour: {str(e)}", exc_info=True)
             break
 
-async def split_large_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> List[Path]:
+async def split_large_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> Tuple[List[Path], int]:
+    """Divise un fichier volumineux en morceaux"""
     chunks = []
     part_num = 1
     total_size = file_path.stat().st_size
     total_parts = (total_size + chunk_size - 1) // chunk_size
+
     with open(file_path, 'rb') as f:
         while True:
             chunk = f.read(chunk_size)
             if not chunk:
                 break
-            chunk_path = file_path.with_name(f"{file_path.name}.part{part_num}")
+            chunk_path = file_path.with_name(f"{file_path.stem}.part{part_num:03d}")
             with open(chunk_path, 'wb') as chunk_file:
                 chunk_file.write(chunk)
             chunks.append(chunk_path)
             part_num += 1
+
     return chunks, total_parts
 
 async def send_file_as_chunks(client: Client, chat_id: int, file_path: Path, message: Message, download_id: str):
+    """Envoie un fichier volumineux en morceaux"""
     try:
         file_size = file_path.stat().st_size
         chunks, total_parts = await split_large_file(file_path)
@@ -799,20 +843,27 @@ async def send_file_as_chunks(client: Client, chat_id: int, file_path: Path, mes
             "total_size": file_size,
             "start_time": time.time()
         }
+
         for i, chunk_path in enumerate(chunks):
             if file_key not in file_chunk_status:
                 logger.warning(f"Envoi annulé pour {file_path}")
                 break
+
             await client.send_document(
                 chat_id=chat_id,
                 document=str(chunk_path),
                 caption=f"📁 {file_path.name} (Partie {i+1}/{total_parts})",
                 disable_notification=True
             )
-            chunk_path.unlink()
+
+            # Supprimer le morceau après envoi
+            chunk_path.unlink(missing_ok=True)
+
+            # Mettre à jour le statut
             file_chunk_status[file_key]["sent_parts"] = i + 1
             progress = (i + 1) / total_parts * 100
             duration = time.time() - file_chunk_status[file_key]["start_time"]
+
             await message.edit_text(
                 format_message(
                     Messages.FILE_CHUNK_SENT,
@@ -823,15 +874,20 @@ async def send_file_as_chunks(client: Client, chat_id: int, file_path: Path, mes
                 ),
                 parse_mode=ParseMode.HTML
             )
-        file_path.unlink()
+
+        # Supprimer le fichier original
+        file_path.unlink(missing_ok=True)
+
         if file_key in file_chunk_status:
             del file_chunk_status[file_key]
+
     except Exception as e:
         logger.error(f"Erreur envoi morceaux {file_path}: {e}")
         if file_key in file_chunk_status:
             del file_chunk_status[file_key]
 
 async def handle_download_complete(client: Client, user_id: int, download_id: str, msg: Message):
+    """Gère la complétion d'un téléchargement"""
     if download_id not in active_downloads:
         return
     download_info = active_downloads[download_id]
@@ -839,6 +895,7 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
         stats = await deps.torrent_client.stats(download_id)
         if not stats:
             raise ValueError("Aucune statistique disponible")
+
         duration = download_info.get("duration", 0)
         completed_data = {
             "name": download_info["name"],
@@ -846,6 +903,7 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
             "duration": format_time(duration),
             "avg_speed": format_speed((stats.wanted * 1024 * 1024) / max(1, duration)),
         }
+
         await msg.edit_text(
             format_message(Messages.COMPLETED_TEMPLATE, **completed_data),
             parse_mode=ParseMode.HTML,
@@ -853,6 +911,7 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
                 [InlineKeyboardButton("📤 Envoyer fichiers", callback_data=f"send_{download_id}")]
             ])
         )
+
         if download_info.get("type") == DownloadType.YOUTUBE_DL and download_info.get("thumbnail"):
             try:
                 await client.send_photo(
@@ -867,47 +926,35 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
         await msg.edit_text(f"❌ <b>Erreur lors du transfert</b>\n\n{str(e)}", parse_mode=ParseMode.HTML)
     finally:
         try:
-            await deps.torrent_client.remove(download_id, delete_data=True)
-            dl_path = Path(download_info.get('dl_path', ''))
-            if dl_path.exists():
-                for file in dl_path.glob('*'):
-                    try:
-                        file.unlink()
-                    except:
-                        pass
-                try:
-                    dl_path.rmdir()
-                except:
-                    pass
-            if 'temp_path' in download_info:
-                temp_path = Path(download_info['temp_path'])
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except:
-                        pass
-            if download_id in active_downloads:
-                del active_downloads[download_id]
+            # Ne pas supprimer les données ici - elles seront supprimées après l'envoi
+            await deps.torrent_client.remove(download_id, delete_data=False)
         except Exception as e:
-            logger.error(f"Erreur nettoyage: {str(e)}")
+            logger.error(f"Erreur lors du retrait: {str(e)}")
 
 @Client.on_callback_query(filters.regex(r"^send_([a-zA-Z0-9]+)$"))
 async def handle_send_files(client: Client, callback_query: CallbackQuery):
+    """Gère l'envoi des fichiers après téléchargement"""
     try:
         download_id = callback_query.matches[0].group(1)
         if download_id not in active_downloads:
             await callback_query.answer("❌ Téléchargement introuvable", show_alert=True)
             return
+
         download_info = active_downloads[download_id]
         dl_path = Path(download_info['dl_path'])
         if not dl_path.exists() or not dl_path.is_dir():
             await callback_query.answer("❌ Dossier introuvable", show_alert=True)
             return
+
         await callback_query.answer("📤 Début de l'envoi des fichiers...")
+
+        # Lister tous les fichiers
         files = [f for f in dl_path.rglob('*') if f.is_file() and not f.name.startswith('.')]
         total_files = len(files)
         sent_files = 0
+
         progress_msg = await callback_query.message.reply_text("⏳ Préparation de l'envoi des fichiers...")
+
         for file_path in files:
             try:
                 file_size = file_path.stat().st_size
@@ -928,16 +975,15 @@ async def handle_send_files(client: Client, callback_query: CallbackQuery):
                         download_id
                     )
                 elif file_size > CHUNK_SIZE:
-                    chunks, _ = await split_large_file(file_path)
-                    for chunk_path in chunks:
+                    chunks, total_parts = await split_large_file(file_path)
+                    for i, chunk_path in enumerate(chunks):
                         await client.send_document(
                             chat_id=callback_query.from_user.id,
                             document=str(chunk_path),
-                            caption=f"📁 {file_path.name} (Partie)",
+                            caption=f"📁 {file_path.name} (Partie {i+1}/{total_parts})",
                             disable_notification=True
                         )
-                        chunk_path.unlink()
-                    file_path.unlink()
+                        chunk_path.unlink(missing_ok=True)
                 else:
                     await client.send_document(
                         chat_id=callback_query.from_user.id,
@@ -945,28 +991,56 @@ async def handle_send_files(client: Client, callback_query: CallbackQuery):
                         caption=f"📁 {file_path.name}",
                         disable_notification=True
                     )
-                    file_path.unlink()
+
                 sent_files += 1
                 await progress_msg.edit_text(
                     f"📤 Envoi en cours...\n\n"
                     f"✅ Fichiers envoyés: {sent_files}/{total_files}\n"
                     f"📦 Dernier fichier: {file_path.name}"
                 )
+
+                # Supprimer le fichier après envoi
+                file_path.unlink(missing_ok=True)
+
             except Exception as e:
                 logger.error(f"Erreur envoi fichier {file_path}: {e}")
+
+        # Supprimer le dossier s'il est vide
+        try:
+            if dl_path.exists() and dl_path.is_dir():
+                if not any(dl_path.iterdir()):
+                    dl_path.rmdir()
+        except Exception as e:
+            logger.error(f"Erreur suppression dossier: {e}")
+
+        # Calculer les statistiques finales
+        total_size = sum(f.stat().st_size for f in files)
+        duration = time.time() - download_info['start_time']
+
         await progress_msg.edit_text(
             format_message(
                 Messages.TRANSFER_COMPLETE,
                 name=download_info['name'],
                 sent=sent_files,
                 total=total_files,
-                duration=format_time(time.time() - download_info['start_time']),
-                additional_info=f"📦 Taille totale: {format_size(sum(f.stat().st_size for f in files))}"
+                duration=format_time(duration),
+                additional_info=f"📦 Taille totale: {format_size(total_size)}"
             ),
             parse_mode=ParseMode.HTML
         )
+
+        # Supprimer la tâche du client torrent
+        try:
+            await deps.torrent_client.remove(download_id, delete_data=False)
+        except Exception as e:
+            logger.error(f"Erreur lors de la suppression de la tâche: {e}")
+
+        # Retirer de la liste des téléchargements actifs
+        if download_id in active_downloads:
+            del active_downloads[download_id]
+
     except Exception as e:
-        logger.error(f"Erreur envoi fichiers: {str(e)}")
+        logger.error(f"Erreur envoi fichiers: {str(e)}", exc_info=True)
         await callback_query.message.reply_text(
             f"❌ Erreur lors de l'envoi des fichiers: {str(e)}",
             parse_mode=ParseMode.HTML
@@ -1018,7 +1092,7 @@ async def handle_conversion_request(client: Client, callback_query: CallbackQuer
 @Client.on_message(filters.command("cleanup", prefixes=["/", "!"]) & admin_only)
 async def cleanup_command(client: Client, message: Message):
     """Nettoyage manuel des téléchargements bloqués (admin seulement)"""
-    await cleanup_stalled_downloads(client)
+    await cleanup_stalled_downloads()
     await message.reply_text("✅ Nettoyage effectué")
 
 @Client.on_message(filters.command("stats", prefixes=["/", "!"]) & admin_only)
@@ -1089,32 +1163,47 @@ async def broadcast_command(client: Client, message: Message):
         f"📊 Total: {total}"
     )
 
-async def cleanup_stalled_downloads(client: Client):
+async def cleanup_stalled_downloads():
     """Nettoie les téléchargements bloqués"""
+    current_time = time.time()
     for dl_id, dl_info in list(active_downloads.items()):
-        if "start_time" in dl_info:
-            duration = asyncio.get_event_loop().time() - dl_info["start_time"]
+        try:
+            start_time = dl_info.get("start_time", current_time)
+            duration = current_time - start_time
+
+            # Téléchargements actifs bloqués depuis plus de 2 heures
             if duration > 7200:  # 2 heures
-                logger.warning(f"Nettoyage du téléchargement bloqué {dl_id}")
-                try:
-                    await client.send_message(
-                        chat_id=dl_info["user_id"],
-                        text="🛑 <b>Téléchargement annulé</b>\n\nLe téléchargement a été bloqué trop longtemps.",
-                        parse_mode=ParseMode.HTML,
-                    )
-                    dl_path = Path(dl_info.get("dl_path", ""))
-                    if dl_path.exists():
-                        for file in dl_path.glob("*"):
-                            try:
-                                file.unlink()
-                            except:
-                                pass
-                        try:
-                            dl_path.rmdir()
-                        except:
-                            pass
-                except Exception as e:
-                    logger.error(f"Erreur nettoyage bloqué {dl_id}: {e}")
-                finally:
-                    if dl_id in active_downloads:
-                        del active_downloads[dl_id]
+                logger.warning(f"Nettoyage téléchargement bloqué: {dl_id}")
+
+                # Annuler le téléchargement dans le client torrent
+                await deps.torrent_client.remove(dl_id, delete_data=True)
+
+                # Supprimer le dossier de téléchargement
+                dl_path = Path(dl_info.get('dl_path', ''))
+                if dl_path.exists() and dl_path.is_dir():
+                    shutil.rmtree(dl_path, ignore_errors=True)
+
+                # Supprimer le fichier temporaire s'il existe
+                if 'temp_path' in dl_info:
+                    temp_path = Path(dl_info['temp_path'])
+                    if temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
+
+                # Retirer de active_downloads
+                del active_downloads[dl_id]
+
+        except Exception as e:
+            logger.error(f"Erreur nettoyage bloqué {dl_id}: {e}")
+
+async def periodic_cleanup():
+    """Tâche périodique de nettoyage"""
+    while True:
+        try:
+            await cleanup_stalled_downloads()
+            logger.info("Nettoyage périodique effectué")
+        except Exception as e:
+            logger.error(f"Erreur nettoyage périodique: {e}")
+        await asyncio.sleep(3600)  # Toutes les heures
+
+# Dans votre fonction principale (ex: main.py)
+# asyncio.create_task(periodic_cleanup())
