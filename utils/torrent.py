@@ -1,4 +1,8 @@
 import os
+import shutil
+import tarfile
+import time
+import zipfile
 import aiohttp
 import asyncio
 import hashlib
@@ -619,7 +623,7 @@ class TorrentClient:
             user_id=task.user_id
         )
 
-        async def _add_torrent(self, source: str, path: Optional[Path],
+    async def _add_torrent(self, source: str, path: Optional[Path],
                          paused: bool, cb: Optional[Callable], user_id: str) -> Optional[str]:
         """Ajout de torrent avec gestion multi-utilisateurs"""
         try:
