@@ -625,52 +625,52 @@ class TorrentClient:
 
     async def _add_torrent(self, source: str, path: Optional[Path],
                          paused: bool, cb: Optional[Callable], user_id: str) -> Optional[str]:
-        """Ajout de torrent avec gestion multi-utilisateurs"""
-        try:
-            p = Path(path) if path else self.dl_dir
-            p = p.absolute()
-            p.mkdir(parents=True, exist_ok=True)
-
-            # Vérification espace disque pour les torrents non-magnet
-            if not source.startswith('magnet:'):
-                info = await asyncio.get_event_loop().run_in_executor(
-                    self.executor, self._get_info, source)
-                if info and not self._disk_space(info.total_size()):
-                    raise RuntimeError("Espace disque insuffisant")
-
-            params = {
-                'save_path': str(p),
-                'storage_mode': lt.storage_mode_t.storage_mode_sparse,
-                'trackers': self.trackers
-            }
-
-            # Ajout basé sur le type de source
-            if source.startswith('magnet:'):
-                h = lt.add_magnet_uri(self.session, source, params)
-            else:
-                if not info: return None
-                params['ti'] = info
-                h = self.session.add_torrent(params)
-
-            tid = hashlib.sha256(h.info_hash().to_bytes()).hexdigest()[:16]
-            self.handles[tid] = h
-            self.download_tasks[tid] = DownloadTask(
-                type=DownloadType.TORRENT,
-                id=tid,
-                handle=h,
-                state=TorrentState.DOWNLOADING,
-                user_id=user_id
-            )
-            log.info(f"Torrent ajouté {tid}: {h.name()}")
-
-            # Démarrer le suivi de progression
-            if cb and not paused:
-                asyncio.create_task(self._progress(tid, cb))
-            return tid
-        except Exception as e:
-            log.error(f"Erreur ajout torrent: {e}", exc_info=True)
-            return None
-
+            """Ajout de torrent avec gestion multi-utilisateurs"""
+            try:
+                p = Path(path) if path else self.dl_dir
+                p = p.absolute()
+                p.mkdir(parents=True, exist_ok=True)
+    
+                # Vérification espace disque pour les torrents non-magnet
+                if not source.startswith('magnet:'):
+                    info = await asyncio.get_event_loop().run_in_executor(
+                        self.executor, self._get_info, source)
+                    if info and not self._disk_space(info.total_size()):
+                        raise RuntimeError("Espace disque insuffisant")
+    
+                params = {
+                    'save_path': str(p),
+                    'storage_mode': lt.storage_mode_t.storage_mode_sparse,
+                    'trackers': self.trackers
+                }
+    
+                # Ajout basé sur le type de source
+                if source.startswith('magnet:'):
+                    h = lt.add_magnet_uri(self.session, source, params)
+                else:
+                    if not info: return None
+                    params['ti'] = info
+                    h = self.session.add_torrent(params)
+    
+                tid = hashlib.sha256(h.info_hash().to_bytes()).hexdigest()[:16]
+                self.handles[tid] = h
+                self.download_tasks[tid] = DownloadTask(
+                    type=DownloadType.TORRENT,
+                    id=tid,
+                    handle=h,
+                    state=TorrentState.DOWNLOADING,
+                    user_id=user_id
+                )
+                log.info(f"Torrent ajouté {tid}: {h.name()}")
+    
+                # Démarrer le suivi de progression
+                if cb and not paused:
+                    asyncio.create_task(self._progress(tid, cb))
+                return tid
+            except Exception as e:
+                log.error(f"Erreur ajout torrent: {e}", exc_info=True)
+                return None
+                
     async def _progress(self, tid: str, cb: Callable, interval=5):
         """Suivi de progression pour les torrents"""
         while tid in self.handles:
