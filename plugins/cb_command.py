@@ -1,4 +1,3 @@
-import math
 import os
 import sys
 import time
@@ -14,6 +13,7 @@ import logging.handlers
 import signal
 import json
 import re
+import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -135,7 +135,6 @@ class Messages:
 ⏳ Temps restant: {eta}
 📦 Taille: {done}|{total}
 {file_progress}
-{ready_files}
 """
 
     COMPLETED_TEMPLATE = """
@@ -146,7 +145,7 @@ class Messages:
 ⏱️ Durée: {duration}
 ⚡ Vitesse moyenne: {avg_speed}
 
-📁 Préparation des fichiers...
+🚀 Démarrage de l'envoi des fichiers...
 """
 
     TRANSFER_COMPLETE = """
@@ -222,6 +221,28 @@ Le lien d'invitation a été automatiquement révoqué après utilisation.
 📁 Fichier: <code>{filename}</code>
 📦 Morceau: {part}/{total_parts}
 📊 Progression: {progress}%
+"""
+    SENDING_TEMPLATE = """
+📤 <b>Envoi des fichiers en cours...</b>
+
+🏷️ <code>{name}</code>
+{progress_bar}
+📦 Fichiers: {sent}/{total} ({progress}%)
+⏱ Temps écoulé: {elapsed_time}
+⏳ Temps estimé restant: {eta}
+📄 Dernier fichier: {last_file}
+📊 Vitesse moyenne: {avg_speed}/s
+"""
+
+    FILE_CHUNK_PROGRESS = """
+📤 <b>Envoi de morceau en cours...</b>
+
+📁 Fichier: <code>{filename}</code>
+{progress_bar}
+📦 Morceau: {current_chunk}/{total_chunks} ({progress}%)
+📊 Taille: {current_size}/{total_size}
+⏱ Temps écoulé: {elapsed_time}
+⏳ Temps estimé restant: {eta}
 """
 
 def format_message(template: str, **kwargs) -> str:
@@ -326,21 +347,6 @@ def admin_only_filter():
 
 group_or_admin = group_or_admin_filter()
 admin_only = admin_only_filter()
-
-@Client.on_callback_query(filters.regex(r"^refresh_([a-zA-Z0-9]+)$"))
-async def handle_refresh(client: Client, callback_query: CallbackQuery):
-    try:
-        download_id = callback_query.matches[0].group(1)
-        if download_id not in active_downloads:
-            await callback_query.answer("❌ Ce téléchargement n'existe plus", show_alert=True)
-            return
-        await callback_query.answer("🔄 Actualisation en cours...")
-        await send_progress_update(
-            client, callback_query.from_user.id, download_id, callback_query.message
-        )
-    except Exception as e:
-        logger.error(f"Erreur lors de l'actualisation: {e}")
-        await callback_query.answer("❌ Échec de l'actualisation", show_alert=True)
 
 @Client.on_callback_query(filters.regex(r"^open_([a-zA-Z0-9]+)$"))
 async def handle_open_download(client: Client, callback_query: CallbackQuery):
@@ -532,6 +538,15 @@ def get_main_keyboard(is_new_user: bool = False) -> InlineKeyboardMarkup:
     ])
     return InlineKeyboardMarkup(buttons)
 
+def get_download_keyboard(download_id: str) -> InlineKeyboardMarkup:
+    """Retourne un clavier simplifié sans boutons Actualiser/Envoyer"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📂 Ouvrir", callback_data=f"open_{download_id}"),
+            InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
+        ]
+    ])
+
 @Client.on_message(filters.text & group_or_admin)
 async def handle_download_requests(client: Client, message: Message):
     user = message.from_user
@@ -579,34 +594,15 @@ async def handle_download_requests(client: Client, message: Message):
             "start_time": asyncio.get_event_loop().time(),
             "name": text[:50] + ("..." if len(text) > 50 else ""),
             "source": text,
-            "completed_files": [],
-            "ready_files": []
+            "completed_files": []
         }
-
-        # Construire le clavier
-        keyboard = []
-        if download_type == DownloadType.YOUTUBE_DL:
-            keyboard.append([
-                InlineKeyboardButton("🎥 MP4 HD", callback_data=f"convert_{download_id}_mp4_hd"),
-                InlineKeyboardButton("🎵 MP3", callback_data=f"convert_{download_id}_mp3_medium")
-            ])
-
-        keyboard.extend([
-            [
-                InlineKeyboardButton("🔄 Actualiser", callback_data=f"refresh_{download_id}"),
-                InlineKeyboardButton("📂 Ouvrir", callback_data=f"open_{download_id}"),
-            ],
-            [
-                InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
-            ]
-        ])
 
         # Envoyer la réponse
         response = await message.reply_text(
             start_msg,
             parse_mode=ParseMode.HTML,
             reply_to_message_id=message.id,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=get_download_keyboard(download_id)
         )
 
         # Démarrer le suivi de progression
@@ -661,8 +657,7 @@ async def handle_torrent_files(client: Client, message: Message):
             "start_time": asyncio.get_event_loop().time(),
             "name": message.document.file_name,
             "temp_path": str(temp_path),
-            "completed_files": [],
-            "ready_files": []
+            "completed_files": []
         }
 
         # Envoyer la réponse
@@ -670,17 +665,7 @@ async def handle_torrent_files(client: Client, message: Message):
             format_message(Messages.TORRENT_RECEIVED),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=message.id,
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("🔄 Actualiser", callback_data=f"refresh_{download_id}"),
-                        InlineKeyboardButton("📂 Ouvrir", callback_data=f"open_{download_id}"),
-                    ],
-                    [
-                        InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
-                    ],
-                ]
-            ),
+            reply_markup=get_download_keyboard(download_id)
         )
 
         # Démarrer le suivi de progression
@@ -721,8 +706,7 @@ async def send_progress_update(client: Client, user_id: int, download_id: str, m
                 "eta": format_time(stats.eta),
                 "done": format_size(stats.done * 1024 * 1024),
                 "total": format_size(stats.wanted * 1024 * 1024),
-                "file_progress": "",
-                "ready_files": ""
+                "file_progress": ""
             }
 
             # Affichage du fichier courant
@@ -732,30 +716,6 @@ async def send_progress_update(client: Client, user_id: int, download_id: str, m
                     f"{create_progress_bar(stats.current_file['progress'])}"
                     f"\n{format_size(stats.current_file['downloaded'])}/{format_size(stats.current_file['size'])}"
                 )
-
-            # Liste des fichiers prêts à être envoyés
-            ready_files_list = []
-            if stats.files:
-                for file in stats.files:
-                    # Vérification de type robuste pour la progression
-                    progress_value = file['progress']
-                    if isinstance(progress_value, list):
-                        progress_value = progress_value[0]  # Prendre le premier élément si liste
-                    elif not isinstance(progress_value, (int, float)):
-                        try:
-                            progress_value = float(progress_value)
-                        except (TypeError, ValueError):
-                            progress_value = 0
-
-                    if progress_value >= 100 and file['path'] not in active_downloads[download_id]['completed_files']:
-                        active_downloads[download_id]['completed_files'].append(file['path'])
-                        active_downloads[download_id]['ready_files'].append(file['path'])
-                        ready_files_list.append(f"✅ {os.path.basename(file['path'])}")
-
-            if ready_files_list:
-                progress_data["ready_files"] = "\n\n📂 Fichiers prêts à l'envoi:\n" + "\n".join(ready_files_list[:3])
-                if len(ready_files_list) > 3:
-                    progress_data["ready_files"] += f"\n... et {len(ready_files_list) - 3} autres"
 
             # Informations spécifiques à YouTube
             if active_downloads[download_id].get("type") == DownloadType.YOUTUBE_DL:
@@ -777,27 +737,10 @@ async def send_progress_update(client: Client, user_id: int, download_id: str, m
 
             # Mise à jour du message toutes les 5 secondes ou quand le téléchargement est presque fini
             if time.time() - last_update > 5 or stats.progress >= 99.9:
-                # Création du clavier
-                keyboard = [
-                    [
-                        InlineKeyboardButton("🔄 Actualiser", callback_data=f"refresh_{download_id}"),
-                        InlineKeyboardButton("📂 Ouvrir", callback_data=f"open_{download_id}"),
-                    ],
-                    [
-                        InlineKeyboardButton("❌ Annuler", callback_data=f"cancel_{download_id}")
-                    ]
-                ]
-
-                # Ajout du bouton "Envoyer fichiers" s'il y a des fichiers prêts
-                if ready_files_list:
-                    keyboard.insert(1, [
-                        InlineKeyboardButton("📤 Envoyer fichiers", callback_data=f"send_{download_id}")
-                    ])
-
                 await msg.edit_text(
                     format_message(Messages.PROGRESS_TEMPLATE, **progress_data),
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    reply_markup=get_download_keyboard(download_id)
                 )
                 last_update = time.time()
 
@@ -831,63 +774,8 @@ async def split_large_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> Tup
 
     return chunks, total_parts
 
-async def send_file_as_chunks(client: Client, chat_id: int, file_path: Path, message: Message, download_id: str):
-    """Envoie un fichier volumineux en morceaux"""
-    try:
-        file_size = file_path.stat().st_size
-        chunks, total_parts = await split_large_file(file_path)
-        file_key = f"{download_id}_{file_path.name}"
-        file_chunk_status[file_key] = {
-            "total_parts": total_parts,
-            "sent_parts": 0,
-            "total_size": file_size,
-            "start_time": time.time()
-        }
-
-        for i, chunk_path in enumerate(chunks):
-            if file_key not in file_chunk_status:
-                logger.warning(f"Envoi annulé pour {file_path}")
-                break
-
-            await client.send_document(
-                chat_id=chat_id,
-                document=str(chunk_path),
-                caption=f"📁 {file_path.name} (Partie {i+1}/{total_parts})",
-                disable_notification=True
-            )
-
-            # Supprimer le morceau après envoi
-            chunk_path.unlink(missing_ok=True)
-
-            # Mettre à jour le statut
-            file_chunk_status[file_key]["sent_parts"] = i + 1
-            progress = (i + 1) / total_parts * 100
-            duration = time.time() - file_chunk_status[file_key]["start_time"]
-
-            await message.edit_text(
-                format_message(
-                    Messages.FILE_CHUNK_SENT,
-                    filename=file_path.name,
-                    part=i+1,
-                    total_parts=total_parts,
-                    progress=progress
-                ),
-                parse_mode=ParseMode.HTML
-            )
-
-        # Supprimer le fichier original
-        file_path.unlink(missing_ok=True)
-
-        if file_key in file_chunk_status:
-            del file_chunk_status[file_key]
-
-    except Exception as e:
-        logger.error(f"Erreur envoi morceaux {file_path}: {e}")
-        if file_key in file_chunk_status:
-            del file_chunk_status[file_key]
-
 async def handle_download_complete(client: Client, user_id: int, download_id: str, msg: Message):
-    """Gère la complétion d'un téléchargement"""
+    """Gère la complétion d'un téléchargement et démarre automatiquement l'envoi des fichiers"""
     if download_id not in active_downloads:
         return
     download_info = active_downloads[download_id]
@@ -904,147 +792,226 @@ async def handle_download_complete(client: Client, user_id: int, download_id: st
             "avg_speed": format_speed((stats.wanted * 1024 * 1024) / max(1, duration)),
         }
 
+        # Retirer la tâche du client torrent (conserver les données)
+        await deps.torrent_client.remove(download_id, delete_data=False)
+
+        # Mettre à jour le message pour indiquer que l'envoi démarre
         await msg.edit_text(
             format_message(Messages.COMPLETED_TEMPLATE, **completed_data),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📤 Envoyer fichiers", callback_data=f"send_{download_id}")]
-            ])
+            parse_mode=ParseMode.HTML
         )
 
-        if download_info.get("type") == DownloadType.YOUTUBE_DL and download_info.get("thumbnail"):
-            try:
-                await client.send_photo(
-                    chat_id=user_id,
-                    photo=download_info["thumbnail"],
-                    caption=f"🖼 Miniature pour {download_info['name']}"
-                )
-            except Exception as e:
-                logger.error(f"Erreur envoi thumbnail: {e}")
+        # Démarrer l'envoi automatique des fichiers
+        await send_files_automatically(client, user_id, download_id, msg)
+
     except Exception as e:
         logger.error(f"Erreur complétion: {str(e)}")
         await msg.edit_text(f"❌ <b>Erreur lors du transfert</b>\n\n{str(e)}", parse_mode=ParseMode.HTML)
-    finally:
+
+async def send_files_automatically(client: Client, user_id: int, download_id: str, msg: Message):
+    """Envoie automatiquement les fichiers après téléchargement complet avec progression"""
+    if download_id not in active_downloads:
+        await msg.edit_text("❌ Téléchargement introuvable")
+        return
+
+    download_info = active_downloads[download_id]
+    dl_path = Path(download_info['dl_path'])
+    if not dl_path.exists() or not dl_path.is_dir():
+        await msg.edit_text("❌ Dossier de téléchargement introuvable")
+        return
+
+    # Lister tous les fichiers
+    files = [f for f in dl_path.rglob('*') if f.is_file() and not f.name.startswith('.')]
+    total_files = len(files)
+    sent_files = 0
+    total_size = sum(f.stat().st_size for f in files)
+    sent_size = 0
+    start_time = time.time()
+    last_update_time = start_time
+
+    # Préparer le message initial
+    await msg.edit_text(
+        format_message(
+            Messages.SENDING_TEMPLATE,
+            name=download_info['name'],
+            progress_bar=create_progress_bar(0),
+            sent=0,
+            total=total_files,
+            progress=0,
+            elapsed_time=format_time(0),
+            eta="Calcul...",
+            last_file="En attente...",
+            avg_speed="0 B"
+        ),
+        parse_mode=ParseMode.HTML
+    )
+
+    for file_path in files:
         try:
-            # Ne pas supprimer les données ici - elles seront supprimées après l'envoi
-            await deps.torrent_client.remove(download_id, delete_data=False)
-        except Exception as e:
-            logger.error(f"Erreur lors du retrait: {str(e)}")
+            file_size = file_path.stat().st_size
+            file_name = file_path.name
+            chunk_index = 0
 
-@Client.on_callback_query(filters.regex(r"^send_([a-zA-Z0-9]+)$"))
-async def handle_send_files(client: Client, callback_query: CallbackQuery):
-    """Gère l'envoi des fichiers après téléchargement"""
-    try:
-        download_id = callback_query.matches[0].group(1)
-        if download_id not in active_downloads:
-            await callback_query.answer("❌ Téléchargement introuvable", show_alert=True)
-            return
+            # Envoyer un avertissement pour les fichiers volumineux
+            if file_size > LARGE_FILE_THRESHOLD:
+                await msg.reply_text(
+                    format_message(
+                        Messages.LARGE_FILE_WARNING,
+                        filename=file_name,
+                        size=format_size(file_size)
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
 
-        download_info = active_downloads[download_id]
-        dl_path = Path(download_info['dl_path'])
-        if not dl_path.exists() or not dl_path.is_dir():
-            await callback_query.answer("❌ Dossier introuvable", show_alert=True)
-            return
+            # Découper et envoyer les fichiers volumineux
+            if file_size > CHUNK_SIZE:
+                chunks, total_chunks = await split_large_file(file_path)
 
-        await callback_query.answer("📤 Début de l'envoi des fichiers...")
+                for i, chunk_path in enumerate(chunks):
+                    chunk_index = i + 1
+                    chunk_size = chunk_path.stat().st_size
+                    chunk_start_time = time.time()
 
-        # Lister tous les fichiers
-        files = [f for f in dl_path.rglob('*') if f.is_file() and not f.name.startswith('.')]
-        total_files = len(files)
-        sent_files = 0
-
-        progress_msg = await callback_query.message.reply_text("⏳ Préparation de l'envoi des fichiers...")
-
-        for file_path in files:
-            try:
-                file_size = file_path.stat().st_size
-                if file_size > LARGE_FILE_THRESHOLD:
-                    await progress_msg.edit_text(
+                    # Mettre à jour la progression du morceau
+                    chunk_progress = (i / total_chunks) * 100
+                    await msg.edit_text(
                         format_message(
-                            Messages.LARGE_FILE_WARNING,
-                            filename=file_path.name,
-                            size=format_size(file_size)
+                            Messages.FILE_CHUNK_PROGRESS,
+                            filename=file_name,
+                            progress_bar=create_progress_bar(chunk_progress),
+                            current_chunk=i,
+                            total_chunks=total_chunks,
+                            progress=f"{chunk_progress:.1f}",
+                            current_size=format_size(i * CHUNK_SIZE),
+                            total_size=format_size(file_size),
+                            elapsed_time=format_time(time.time() - start_time),
+                            eta="Calcul..."
                         ),
                         parse_mode=ParseMode.HTML
                     )
-                    await send_file_as_chunks(
-                        client,
-                        callback_query.from_user.id,
-                        file_path,
-                        progress_msg,
-                        download_id
-                    )
-                elif file_size > CHUNK_SIZE:
-                    chunks, total_parts = await split_large_file(file_path)
-                    for i, chunk_path in enumerate(chunks):
-                        await client.send_document(
-                            chat_id=callback_query.from_user.id,
-                            document=str(chunk_path),
-                            caption=f"📁 {file_path.name} (Partie {i+1}/{total_parts})",
-                            disable_notification=True
-                        )
-                        chunk_path.unlink(missing_ok=True)
-                else:
+
+                    # Envoyer le morceau
                     await client.send_document(
-                        chat_id=callback_query.from_user.id,
-                        document=str(file_path),
-                        caption=f"📁 {file_path.name}",
+                        chat_id=user_id,
+                        document=str(chunk_path),
+                        caption=f"📁 {file_name} (Partie {chunk_index}/{total_chunks})",
                         disable_notification=True
                     )
 
-                sent_files += 1
-                await progress_msg.edit_text(
-                    f"📤 Envoi en cours...\n\n"
-                    f"✅ Fichiers envoyés: {sent_files}/{total_files}\n"
-                    f"📦 Dernier fichier: {file_path.name}"
+                    # Mettre à jour les statistiques
+                    sent_size += chunk_size
+                    chunk_path.unlink(missing_ok=True)
+
+                    # Calculer la vitesse d'envoi
+                    chunk_duration = time.time() - chunk_start_time
+                    chunk_speed = chunk_size / max(0.1, chunk_duration)
+
+                    # Mettre à jour toutes les 15 secondes ou pour le dernier morceau
+                    current_time = time.time()
+                    if current_time - last_update_time > 15 or chunk_index == total_chunks:
+                        elapsed = current_time - start_time
+                        progress_percent = (sent_size / total_size) * 100
+
+                        # Calculer le temps restant
+                        if sent_size > 0:
+                            remaining_size = total_size - sent_size
+                            avg_speed = sent_size / elapsed
+                            eta_seconds = remaining_size / avg_speed if avg_speed > 0 else 0
+                        else:
+                            eta_seconds = 0
+
+                        await msg.edit_text(
+                            format_message(
+                                Messages.SENDING_TEMPLATE,
+                                name=download_info['name'],
+                                progress_bar=create_progress_bar(progress_percent),
+                                sent=sent_files,
+                                total=total_files,
+                                progress=f"{progress_percent:.1f}",
+                                elapsed_time=format_time(elapsed),
+                                eta=format_time(eta_seconds),
+                                last_file=file_name,
+                                avg_speed=format_speed(avg_speed)
+                            ),
+                            parse_mode=ParseMode.HTML
+                        )
+                        last_update_time = current_time
+            else:
+                # Envoyer le fichier normal
+                await client.send_document(
+                    chat_id=user_id,
+                    document=str(file_path),
+                    caption=f"📁 {file_name}",
+                    disable_notification=True
                 )
+                sent_size += file_size
 
-                # Supprimer le fichier après envoi
-                file_path.unlink(missing_ok=True)
+            sent_files += 1
 
-            except Exception as e:
-                logger.error(f"Erreur envoi fichier {file_path}: {e}")
+            # Mettre à jour après chaque fichier
+            elapsed = time.time() - start_time
+            progress_percent = (sent_size / total_size) * 100
 
-        # Supprimer le dossier s'il est vide
-        try:
-            if dl_path.exists() and dl_path.is_dir():
-                if not any(dl_path.iterdir()):
-                    dl_path.rmdir()
+            # Calculer le temps restant
+            if sent_size > 0:
+                remaining_size = total_size - sent_size
+                avg_speed = sent_size / elapsed
+                eta_seconds = remaining_size / avg_speed if avg_speed > 0 else 0
+            else:
+                eta_seconds = 0
+
+            await msg.edit_text(
+                format_message(
+                    Messages.SENDING_TEMPLATE,
+                    name=download_info['name'],
+                    progress_bar=create_progress_bar(progress_percent),
+                    sent=sent_files,
+                    total=total_files,
+                    progress=f"{progress_percent:.1f}",
+                    elapsed_time=format_time(elapsed),
+                    eta=format_time(eta_seconds),
+                    last_file=file_name,
+                    avg_speed=format_speed(sent_size / elapsed)
+                ),
+                parse_mode=ParseMode.HTML
+            )
+
+            # Supprimer le fichier après envoi
+            file_path.unlink(missing_ok=True)
+
         except Exception as e:
-            logger.error(f"Erreur suppression dossier: {e}")
+            logger.error(f"Erreur envoi fichier {file_path}: {e}")
+            await msg.reply_text(f"❌ Échec de l'envoi du fichier {file_path.name}: {str(e)}")
 
-        # Calculer les statistiques finales
-        total_size = sum(f.stat().st_size for f in files)
-        duration = time.time() - download_info['start_time']
-
-        await progress_msg.edit_text(
-            format_message(
-                Messages.TRANSFER_COMPLETE,
-                name=download_info['name'],
-                sent=sent_files,
-                total=total_files,
-                duration=format_time(duration),
-                additional_info=f"📦 Taille totale: {format_size(total_size)}"
-            ),
-            parse_mode=ParseMode.HTML
-        )
-
-        # Supprimer la tâche du client torrent
-        try:
-            await deps.torrent_client.remove(download_id, delete_data=False)
-        except Exception as e:
-            logger.error(f"Erreur lors de la suppression de la tâche: {e}")
-
-        # Retirer de la liste des téléchargements actifs
-        if download_id in active_downloads:
-            del active_downloads[download_id]
-
+    # Nettoyage final
+    try:
+        if dl_path.exists() and dl_path.is_dir():
+            if not any(dl_path.iterdir()):
+                dl_path.rmdir()
     except Exception as e:
-        logger.error(f"Erreur envoi fichiers: {str(e)}", exc_info=True)
-        await callback_query.message.reply_text(
-            f"❌ Erreur lors de l'envoi des fichiers: {str(e)}",
-            parse_mode=ParseMode.HTML
-        )
+        logger.error(f"Erreur suppression dossier: {e}")
+
+    # Calculer les statistiques finales
+    duration = time.time() - start_time
+    avg_speed = sent_size / duration if duration > 0 else 0
+
+    await msg.edit_text(
+        format_message(
+            Messages.TRANSFER_COMPLETE,
+            name=download_info['name'],
+            sent=sent_files,
+            total=total_files,
+            duration=format_time(duration),
+            additional_info=(
+                f"📦 Taille totale: {format_size(total_size)}\n"
+                f"⚡ Vitesse moyenne: {format_speed(avg_speed)}/s"
+            )
+        ),
+        parse_mode=ParseMode.HTML
+    )
+
+    if download_id in active_downloads:
+        del active_downloads[download_id]
 
 @Client.on_callback_query(filters.regex(r"^convert_([a-zA-Z0-9]+)_([a-z0-9]+)_([a-z]+)$"))
 async def handle_conversion_request(client: Client, callback_query: CallbackQuery):
@@ -1205,5 +1172,5 @@ async def periodic_cleanup():
             logger.error(f"Erreur nettoyage périodique: {e}")
         await asyncio.sleep(3600)  # Toutes les heures
 
-# Dans votre fonction principale (ex: main.py)
+# Démarrer la tâche de nettoyage périodique
 # asyncio.create_task(periodic_cleanup())

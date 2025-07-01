@@ -29,7 +29,7 @@ class Dependencies:
             config = self.config.TORRENT_CONFIG
 
             self.torrent_client = TorrentClient(
-                dl_dir=config.get("DL_DIR", "./downloads"),
+                dl_dir=config.get("DL_DIR", "./data/downloads"),
                 ports=(
                     config.get("MIN_PORT", 6881),
                     config.get("MAX_PORT", 6891)
