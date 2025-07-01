@@ -101,7 +101,7 @@ class TorrentStats:
 class TorrentClient:
     def __init__(
         self,
-        dl_dir: Union[str, Path] = "./downloads",
+        dl_dir: Union[str, Path] = "./data/downloads",
         ports: Tuple[int, int] = (6881, 6891),
         max_up: int = 1000,  # kB/s
         max_dl: int = -1,     # kB/s
@@ -814,7 +814,7 @@ class TorrentClient:
             disk=self._get_disk_usage(),
             user_id=task.user_id,
             num_files=1,  # HTTP: toujours 1 fichier
-            current_file=current_file  
+            current_file=current_file
         )
 
     async def _get_torrent_stats(self, tid: str) -> Optional[TorrentStats]:
