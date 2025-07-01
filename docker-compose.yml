@@ -1,17 +1,14 @@
-version: '3.8'
+version: "3.9"
 
 services:
-  torrent-bot:
+  torrentbot:
     build: .
-    container_name: torrent-bot
+    container_name: torrentbot
     restart: unless-stopped
-    environment:
-      - MONGO_URI=${MONGO_URI}
-      - API_ID=${API_ID}
-      - API_HASH=${API_HASH}
-      - BOT_TOKEN=${BOT_TOKEN}
     volumes:
-      - ./downloads:/downloads
-      - ./data:/app/data
+      - ./data/downloads:/app/data/downloads
     ports:
-      - 8080:8080  
+      - "8080:8080" 
+    environment:
+      - TZ=Africa/Kinshasa
+    command: python3.9 main.py

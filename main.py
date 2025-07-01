@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
-from bot import Dependencies
+from bot import get_deps
 from route import web_server
 from aiohttp import web
 import logging
@@ -8,7 +8,6 @@ from pyrogram import idle
 from pathlib import Path
 import signal
 
-# Configuration du logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,8 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def graceful_shutdown(deps: Dependencies, bot):
-    """Gère l'arrêt propre de l'application"""
+async def graceful_shutdown(deps, bot):
     logger.info("Début du shutdown gracieux...")
 
     try:
@@ -36,24 +34,19 @@ async def graceful_shutdown(deps: Dependencies, bot):
     logger.info("Bot arrêté avec succès")
 
 async def main():
-    """Point d'entrée principal de l'application"""
-    deps = Dependencies()
+    deps = get_deps()
     bot = None
 
     try:
-        # Initialisation des dépendances
         await deps.startup()
 
-        # Vérification des dossiers nécessaires
         Path("downloads").mkdir(exist_ok=True)
         Path("temp").mkdir(exist_ok=True)
 
-        # Initialisation du bot
         bot = deps.initialize_bot()
         await bot.start()
         logger.info("Bot démarré avec succès")
 
-        # Configuration des handlers de signal
         loop = asyncio.get_running_loop()
 
         def shutdown_handler():
@@ -62,7 +55,6 @@ async def main():
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, shutdown_handler)
 
-        # Démarrage du serveur web si configuré
         if deps.config.WEBHOOK:
             app = web.AppRunner(await web_server())
             await app.setup()
@@ -71,11 +63,9 @@ async def main():
             await site.start()
             logger.info(f"Serveur web démarré sur {deps.config.WEB_HOST}:{deps.config.WEB_PORT}")
 
-        # Nettoyage périodique
         async def periodic_tasks():
             while True:
-                await asyncio.sleep(3600)  # Toutes les heures
-
+                await asyncio.sleep(3600)
                 try:
                     await deps.torrent_client.cleanup_stalled_downloads()
                     logger.info("Nettoyage périodique effectué")
@@ -84,7 +74,6 @@ async def main():
 
         asyncio.create_task(periodic_tasks())
 
-        # Attente active
         await idle()
 
     except Exception as e:

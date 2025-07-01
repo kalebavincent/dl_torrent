@@ -1,37 +1,40 @@
-FROM python:3.9-slim-bookworm AS builder
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Installer toutes les dépendances système et python
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    software-properties-common \
     build-essential \
-    python3-dev \
+    python3.9 \
+    python3.9-dev \
+    python3-pip \
     libboost-python-dev \
     libboost-system-dev \
     libssl-dev \
     libgeoip-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    git \
+    curl \
+    aria2 \
+    ffmpeg \
+    qbittorrent-nox && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
+# Copier requirements et installer
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN python3.9 -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-FROM python:3.9-slim-bookworm
-
-WORKDIR /app
-
-COPY --from=builder /root/.local /root/.local
-ENV PATH="/root/.local/bin:$PATH"
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libboost-system1.74.0 \
-    libssl3 \
-    libgeoip1 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
+# Copier le reste du code
 COPY . .
 
-RUN mkdir -p /downloads && chmod 777 /downloads
-VOLUME ["/downloads"]
+# Créer le dossier data/downloads avec tous les droits
+RUN mkdir -p /app/data/downloads && chmod -R 777 /app/data
 
-CMD ["python3", "main.py"]
+VOLUME ["/app/data/downloads"]
+
+CMD ["python3.9", "main.py"]

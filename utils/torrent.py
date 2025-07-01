@@ -225,6 +225,18 @@ class TorrentClient:
             log.error(f"Torrent error {source}: {e}")
             return None
 
+    async def check_connection(self) -> bool:
+        """Vérifie si le client torrent est connecté"""
+        try:
+            if not self.session.is_listening():
+                log.error("Client torrent not listening")
+                return False
+            log.info("Client torrent is listening")
+            return True
+        except Exception as e:
+            log.error(f"Connection check error: {e}")
+            return False
+
     async def add(self, source: str, path: Optional[Path] = None,
                 paused=False, cb=None, user_id: str = None,
                 download_type: str = None) -> Optional[str]:
@@ -630,20 +642,20 @@ class TorrentClient:
                 p = Path(path) if path else self.dl_dir
                 p = p.absolute()
                 p.mkdir(parents=True, exist_ok=True)
-    
+
                 # Vérification espace disque pour les torrents non-magnet
                 if not source.startswith('magnet:'):
                     info = await asyncio.get_event_loop().run_in_executor(
                         self.executor, self._get_info, source)
                     if info and not self._disk_space(info.total_size()):
                         raise RuntimeError("Espace disque insuffisant")
-    
+
                 params = {
                     'save_path': str(p),
                     'storage_mode': lt.storage_mode_t.storage_mode_sparse,
                     'trackers': self.trackers
                 }
-    
+
                 # Ajout basé sur le type de source
                 if source.startswith('magnet:'):
                     h = lt.add_magnet_uri(self.session, source, params)
@@ -651,7 +663,7 @@ class TorrentClient:
                     if not info: return None
                     params['ti'] = info
                     h = self.session.add_torrent(params)
-    
+
                 tid = hashlib.sha256(h.info_hash().to_bytes()).hexdigest()[:16]
                 self.handles[tid] = h
                 self.download_tasks[tid] = DownloadTask(
@@ -662,7 +674,7 @@ class TorrentClient:
                     user_id=user_id
                 )
                 log.info(f"Torrent ajouté {tid}: {h.name()}")
-    
+
                 # Démarrer le suivi de progression
                 if cb and not paused:
                     asyncio.create_task(self._progress(tid, cb))
@@ -670,7 +682,7 @@ class TorrentClient:
             except Exception as e:
                 log.error(f"Erreur ajout torrent: {e}", exc_info=True)
                 return None
-                
+
     async def _progress(self, tid: str, cb: Callable, interval=5):
         """Suivi de progression pour les torrents"""
         while tid in self.handles:
@@ -1083,41 +1095,6 @@ class TorrentClient:
             return True
 
         return False
-
-    async def close(self):
-        """Nettoyage des ressources"""
-        log.info("Début de la procédure d'arrêt...")
-
-        # Arrêter tous les torrents
-        for tid in list(self.handles):
-            try:
-                self.session.remove_torrent(self.handles[tid], False)
-                del self.handles[tid]
-            except Exception as e:
-                log.error(f"Erreur fermeture torrent {tid}: {e}")
-
-        # Annuler tous les téléchargements
-        for task_id in list(self.download_tasks.keys()):
-            try:
-                task = self.download_tasks[task_id]
-                if task.type == DownloadType.HTTP:
-                    await self._cancel_http_download(task_id, False)
-                elif task.type == DownloadType.YOUTUBE_DL:
-                    await self._cancel_youtube_dl_download(task_id, False)
-                elif task.type == DownloadType.ARIA2:
-                    await self._cancel_aria2_download(task_id, False)
-            except Exception as e:
-                log.error(f"Erreur fermeture tâche {task_id}: {e}")
-
-        # Fermer les sessions
-        self.session.pause()
-        if self.http_session:
-            await self.http_session.close()
-        self.executor.shutdown(wait=True)
-
-        log.info("Client arrêté proprement")
-
-        # ... [Le code précédent continue] ...
 
     async def get_task_details(self, task_id: str) -> Optional[Dict]:
         """Récupère les détails complets d'une tâche"""
@@ -2262,6 +2239,25 @@ class TorrentClient:
         except Exception as e:
             log.error(f"Erreur analyse qualité vidéo: {e}")
             return {}
+
+    async def cleanup_stalled_downloads(self):
+        """Nettoie les téléchargements bloqués ou en erreur"""
+        log.info("Début du nettoyage des téléchargements bloqués...")
+
+        for task_id, task in list(self.download_tasks.items()):
+            if task.state in (TorrentState.ERROR, TorrentState.CANCELLED):
+                log.warning(f"Suppression tâche bloquée: {task_id} ({task.state.name})")
+                del self.download_tasks[task_id]
+
+                # Supprimer le fichier associé
+                if task.path and task.path.exists():
+                    try:
+                        task.path.unlink()
+                        log.info(f"Fichier supprimé: {task.path}")
+                    except Exception as e:
+                        log.error(f"Erreur suppression fichier {task.path}: {e}")
+
+        log.info("Nettoyage terminé")
 
     async def __aenter__(self):
         return self

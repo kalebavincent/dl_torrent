@@ -12,7 +12,7 @@ from pyrogram.types import (
     CallbackQuery,
 )
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
-from bot import Dependencies
+from bot import get_deps
 from model.user import Role, SubTier, UserCreate
 from typing import Any, Optional, Dict, List, Tuple
 import logging
@@ -23,7 +23,7 @@ import math
 import threading
 import psutil
 
-deps = Dependencies()
+deps = get_deps()
 logger = logging.getLogger(__name__)
 
 # Configuration des expressions régulières
@@ -550,7 +550,8 @@ async def handle_download_requests(client: Client, message: Message):
         download_id = await deps.torrent_client.add(
             text,
             str(dl_path),
-            download_type=download_type
+            download_type=download_type,
+            user_id=user.id,
         )
         if not download_id:
             raise ValueError("Échec de l'initialisation")
